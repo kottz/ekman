@@ -1,4 +1,4 @@
-use chrono::NaiveDateTime;
+use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 
 // Exercise models ------------------------------------------------------------
@@ -39,7 +39,7 @@ pub struct PopulatedExercise {
     pub exercise_id: i64,
     pub name: String,
     pub target_sets: Option<i32>,
-    pub last_session_date: Option<NaiveDateTime>,
+    pub last_session_date: Option<DateTime<Utc>>,
     pub last_session_sets: Vec<SetCompact>,
 }
 
@@ -68,7 +68,7 @@ pub struct LogSetRequest {
     pub weight: f64,
     pub reps: i32,
     pub notes: Option<String>,
-    pub completed_at: Option<NaiveDateTime>,
+    pub completed_at: Option<DateTime<Utc>>,
 }
 
 #[derive(Debug, Deserialize, Serialize, Clone)]
@@ -76,7 +76,7 @@ pub struct UpdateSetRequest {
     pub weight: Option<f64>,
     pub reps: Option<i32>,
     pub notes: Option<String>,
-    pub completed_at: Option<NaiveDateTime>,
+    pub completed_at: Option<DateTime<Utc>>,
 }
 
 // Graph & analytics models --------------------------------------------------

@@ -86,20 +86,21 @@ pub async fn ensure_default_user(db: &Database, username: &str) -> AppResult<i64
     Ok(id)
 }
 
-pub fn serialize_timestamp(dt: NaiveDateTime) -> String {
-    DateTime::<Utc>::from_naive_utc_and_offset(dt, Utc).to_rfc3339_opts(SecondsFormat::Secs, true)
+pub fn serialize_timestamp(dt: DateTime<Utc>) -> String {
+    dt.to_rfc3339_opts(SecondsFormat::Secs, true)
 }
 
-pub fn parse_timestamp(raw: &str) -> AppResult<NaiveDateTime> {
+pub fn parse_timestamp(raw: &str) -> AppResult<DateTime<Utc>> {
     if let Ok(dt) = DateTime::parse_from_rfc3339(raw) {
-        return Ok(dt.naive_utc());
+        return Ok(dt.with_timezone(&Utc));
     }
 
     NaiveDateTime::parse_from_str(raw, "%Y-%m-%d %H:%M:%S")
         .or_else(|_| NaiveDateTime::parse_from_str(raw, "%Y-%m-%dT%H:%M:%S"))
+        .map(|naive| DateTime::<Utc>::from_naive_utc_and_offset(naive, Utc))
         .map_err(|err| AppError::BadRequest(format!("invalid timestamp '{raw}': {err}")))
 }
 
-pub fn now_utc() -> NaiveDateTime {
-    Utc::now().naive_utc()
+pub fn now_utc() -> DateTime<Utc> {
+    Utc::now()
 }

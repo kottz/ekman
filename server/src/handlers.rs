@@ -6,7 +6,7 @@ use axum::{
     http::StatusCode,
     response::IntoResponse,
 };
-use chrono::{Duration, NaiveDateTime, Utc};
+use chrono::{DateTime, Duration, Utc};
 use turso::{Connection, Value};
 
 use crate::{
@@ -81,7 +81,7 @@ pub async fn get_daily_plans(
     for template in templates_vec.iter_mut() {
         for exercise in template.exercises.iter_mut() {
             if let Some((date, sets)) = last_sessions.get(&exercise.exercise_id) {
-                exercise.last_session_date = *date;
+                exercise.last_session_date = date.map(|dt| dt.with_timezone(&Utc));
                 exercise.last_session_sets = sets.clone();
             }
         }
@@ -343,7 +343,7 @@ pub async fn archive_exercise(
 async fn load_last_sessions(
     state: &AppState,
     exercise_ids: &[i64],
-) -> AppResult<HashMap<i64, (Option<NaiveDateTime>, Vec<SetCompact>)>> {
+) -> AppResult<HashMap<i64, (Option<DateTime<Utc>>, Vec<SetCompact>)>> {
     let conn = state.db.connect()?;
     let mut last_sessions = HashMap::new();
 
@@ -405,15 +405,16 @@ async fn load_sets_for_session(
     Ok(sets)
 }
 
-fn parse_period(period: &str) -> AppResult<Option<NaiveDateTime>> {
-    let now = Utc::now().naive_utc();
-    match period {
-        "all" => Ok(None),
-        "1m" => Ok(Some(now - Duration::days(30))),
-        "3m" => Ok(Some(now - Duration::days(90))),
-        "1y" => Ok(Some(now - Duration::days(365))),
-        other => Err(AppError::BadRequest(format!("invalid period '{other}'"))),
-    }
+fn parse_period(period: &str) -> AppResult<Option<DateTime<Utc>>> {
+    let now = Utc::now();
+    let parsed = match period {
+        "all" => None,
+        "1m" => Some(now - Duration::days(30)),
+        "3m" => Some(now - Duration::days(90)),
+        "1y" => Some(now - Duration::days(365)),
+        other => return Err(AppError::BadRequest(format!("invalid period '{other}'"))),
+    };
+    Ok(parsed)
 }
 
 async fn fetch_exercise_name(
@@ -442,7 +443,7 @@ async fn fetch_exercise_sets(
     conn: &Connection,
     exercise_id: i64,
     user_id: i64,
-    start: Option<NaiveDateTime>,
+    start: Option<DateTime<Utc>>,
 ) -> AppResult<Vec<SetDataPoint>> {
     let mut sql = String::from(
         "SELECT ws.session_id, s.started_at, ws.weight_kg, ws.reps \
@@ -469,7 +470,7 @@ async fn fetch_exercise_sets(
 
         sets.push(SetDataPoint {
             session_id,
-            date: started_at.date(),
+            date: started_at.date_naive(),
             weight,
             reps: reps as i32,
         });
