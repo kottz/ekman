@@ -1,4 +1,4 @@
-use chrono::{DateTime, Datelike, Local};
+use chrono::{DateTime, Datelike, Duration as ChronoDuration, Local, Utc};
 use color_eyre::eyre::WrapErr;
 use crossterm::event::{self, Event, KeyCode, KeyEvent, KeyEventKind, KeyModifiers};
 use ekman_core::models::{
@@ -563,21 +563,23 @@ impl ExerciseState {
     }
 
     fn from_template(template: &ExerciseTemplate) -> Self {
-        Self::with_set_slots(template.name.to_string(), template.starting_weight, 4, &[])
+        Self::with_set_slots(
+            template.name.to_string(),
+            template.starting_weight,
+            4,
+            &[],
+            None,
+        )
     }
 
     fn from_populated_exercise(exercise: &PopulatedExercise) -> Self {
         let set_count = exercise.target_sets.unwrap_or(4).max(1) as usize;
-        let starting_weight = exercise
-            .last_session_sets
-            .first()
-            .map(|set| set.weight as f32)
-            .unwrap_or(0.0);
         Self::with_set_slots(
             exercise.name.clone(),
-            starting_weight,
+            0.0,
             set_count,
             &exercise.last_session_sets,
+            exercise.last_session_date,
         )
     }
 
@@ -586,18 +588,25 @@ impl ExerciseState {
         starting_weight: f32,
         set_count: usize,
         previous_sets: &[SetCompact],
+        last_session_date: Option<DateTime<Utc>>,
     ) -> Self {
         let slots = set_count.max(1);
         let mut sets = Vec::with_capacity(slots);
 
+        let should_prefill = should_prefill_weight(last_session_date);
+        let best_weight = if should_prefill {
+            previous_sets
+                .iter()
+                .map(|set| set.weight as f32)
+                .max_by(|a, b| a.total_cmp(b))
+        } else {
+            None
+        };
+        let weight_seed = best_weight.unwrap_or(starting_weight);
+
         for idx in 0..slots {
             let reps = previous_sets.get(idx).map(|set| set.reps.max(0) as u32);
-            let weight_value = previous_sets
-                .get(idx)
-                .map(|set| set.weight as f32)
-                .unwrap_or(starting_weight);
-            let prefill_weight = previous_sets.get(idx).is_some();
-            sets.push(SetEntry::new(reps, weight_value, prefill_weight));
+            sets.push(SetEntry::new(reps, weight_seed, best_weight.is_some()));
         }
 
         Self {
@@ -908,6 +917,13 @@ fn select_plan_for_today(plans: &[PopulatedTemplate]) -> Option<&PopulatedTempla
         .iter()
         .find(|plan| plan.day_of_week == Some(today))
         .or_else(|| plans.first())
+}
+
+fn should_prefill_weight(last_session_date: Option<DateTime<Utc>>) -> bool {
+    last_session_date.is_some_and(|date| {
+        let since = Utc::now().signed_duration_since(date);
+        since <= ChronoDuration::days(90)
+    })
 }
 
 /// Fetch daily workout plans from the backend API.
