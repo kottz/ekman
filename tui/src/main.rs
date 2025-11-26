@@ -12,7 +12,12 @@ use ratatui::{
     text::Line,
     widgets::{Axis, Block, Cell, Chart, Dataset, GraphType, Paragraph, Row, Table},
 };
-use std::fmt::Write;
+use std::{
+    fmt::Write,
+    time::{Duration, Instant},
+};
+
+const INPUT_RESET_TIMEOUT: Duration = Duration::from_secs(1);
 
 const BACKEND_BASE_URL: &str = "http://localhost:3000";
 const DAILY_PLANS_PATH: &str = "/api/plans/daily";
@@ -647,6 +652,7 @@ impl ExerciseState {
 struct WeightEntry {
     value: f32,
     buffer: String,
+    last_input: Option<Instant>,
 }
 
 impl WeightEntry {
@@ -654,6 +660,7 @@ impl WeightEntry {
         Self {
             value,
             buffer: format!("{value:.1}"),
+            last_input: None,
         }
     }
 
@@ -669,10 +676,18 @@ impl WeightEntry {
         if !(ch.is_ascii_digit() || ch == '.') {
             return;
         }
+        let now = Instant::now();
+        let should_reset = self
+            .last_input
+            .is_none_or(|last| now.duration_since(last) > INPUT_RESET_TIMEOUT);
+        if should_reset {
+            self.buffer.clear();
+        }
         self.buffer.push(ch);
         if let Ok(parsed) = self.buffer.parse::<f32>() {
             self.value = parsed;
         }
+        self.last_input = Some(now);
     }
 
     fn backspace(&mut self) {
