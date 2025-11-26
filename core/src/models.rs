@@ -93,7 +93,8 @@ pub enum MetricKind {
 
 #[derive(Debug, Deserialize, Serialize, Clone)]
 pub struct GraphRequest {
-    pub period: String,
+    pub start: Option<DateTime<Utc>>,
+    pub end: Option<DateTime<Utc>>,
     pub metric: Option<MetricKind>,
 }
 
@@ -137,8 +138,15 @@ mod tests {
 
     #[test]
     fn graph_request_query_serializes_metric_snake_case() {
+        let start = DateTime::parse_from_rfc3339("2024-01-01T00:00:00Z")
+            .unwrap()
+            .with_timezone(&Utc);
+        let end = DateTime::parse_from_rfc3339("2024-02-01T00:00:00Z")
+            .unwrap()
+            .with_timezone(&Utc);
         let encoded = serde_urlencoded::to_string(GraphRequest {
-            period: "1m".to_string(),
+            start: Some(start),
+            end: Some(end),
             metric: Some(MetricKind::Est1Rm),
         })
         .unwrap();
@@ -147,5 +155,30 @@ mod tests {
             encoded.contains("metric=est_1rm"),
             "expected metric to be serialized as snake_case, got {encoded}"
         );
+        assert!(
+            encoded.contains("start=2024-01-01T00%3A00%3A00Z"),
+            "expected start to serialize as RFC3339, got {encoded}"
+        );
+        assert!(encoded.contains("end=2024-02-01T00%3A00%3A00Z"));
+    }
+
+    #[test]
+    fn graph_request_start_end_round_trip() {
+        let start = DateTime::parse_from_rfc3339("2025-11-26T14:32:10Z")
+            .unwrap()
+            .with_timezone(&Utc);
+        let end = DateTime::parse_from_rfc3339("2025-12-01T00:00:00Z")
+            .unwrap()
+            .with_timezone(&Utc);
+        let encoded = serde_urlencoded::to_string(GraphRequest {
+            start: Some(start),
+            end: Some(end),
+            metric: None,
+        })
+        .unwrap();
+        let decoded: GraphRequest = serde_urlencoded::from_str(&encoded).unwrap();
+        assert_eq!(decoded.start, Some(start));
+        assert_eq!(decoded.end, Some(end));
+        assert!(decoded.metric.is_none());
     }
 }

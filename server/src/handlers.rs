@@ -6,7 +6,7 @@ use axum::{
     http::StatusCode,
     response::IntoResponse,
 };
-use chrono::{DateTime, Duration, Utc};
+use chrono::{DateTime, Utc};
 use turso::{Connection, Value};
 
 use crate::{
@@ -96,11 +96,22 @@ pub async fn get_exercise_graph(
     Query(request): Query<GraphRequest>,
 ) -> AppResult<Json<GraphResponse>> {
     let metric = request.metric.unwrap_or(MetricKind::MaxWeight);
-    let start_filter = parse_period(&request.period)?;
+    if let (Some(start), Some(end)) = (request.start, request.end) && start > end {
+        return Err(AppError::BadRequest(
+            "start must be before or equal to end".to_string(),
+        ));
+    }
 
     let conn = state.db.connect()?;
     let exercise_name = fetch_exercise_name(&conn, exercise_id, state.default_user_id).await?;
-    let sets = fetch_exercise_sets(&conn, exercise_id, state.default_user_id, start_filter).await?;
+    let sets = fetch_exercise_sets(
+        &conn,
+        exercise_id,
+        state.default_user_id,
+        request.start,
+        request.end,
+    )
+    .await?;
 
     let points = build_graph_points(sets, metric, MAX_GRAPH_POINTS);
 
@@ -405,18 +416,6 @@ async fn load_sets_for_session(
     Ok(sets)
 }
 
-fn parse_period(period: &str) -> AppResult<Option<DateTime<Utc>>> {
-    let now = Utc::now();
-    let parsed = match period {
-        "all" => None,
-        "1m" => Some(now - Duration::days(30)),
-        "3m" => Some(now - Duration::days(90)),
-        "1y" => Some(now - Duration::days(365)),
-        other => return Err(AppError::BadRequest(format!("invalid period '{other}'"))),
-    };
-    Ok(parsed)
-}
-
 async fn fetch_exercise_name(
     conn: &Connection,
     exercise_id: i64,
@@ -444,6 +443,7 @@ async fn fetch_exercise_sets(
     exercise_id: i64,
     user_id: i64,
     start: Option<DateTime<Utc>>,
+    end: Option<DateTime<Utc>>,
 ) -> AppResult<Vec<SetDataPoint>> {
     let mut sql = String::from(
         "SELECT ws.session_id, s.started_at, ws.weight_kg, ws.reps \
@@ -454,8 +454,12 @@ async fn fetch_exercise_sets(
 
     let mut params: Vec<Value> = vec![exercise_id.into(), user_id.into()];
     if let Some(start) = start {
-        sql.push_str(" AND ws.completed_at >= ?3");
+        sql.push_str(&format!(" AND ws.completed_at >= ?{}", params.len() + 1));
         params.push(serialize_timestamp(start).into());
+    }
+    if let Some(end) = end {
+        sql.push_str(&format!(" AND ws.completed_at <= ?{}", params.len() + 1));
+        params.push(serialize_timestamp(end).into());
     }
     sql.push_str(" ORDER BY ws.completed_at ASC");
 
