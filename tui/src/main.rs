@@ -84,8 +84,8 @@ impl App {
             status_line: String::new(),
             backend_status: String::from("Backend: not loaded"),
             hints_line: String::from(
-                "Left/Right: move set cursor • Up/Down/Tab: toggle weight/reps • N: next \
-                 exercise • E: previous • digits: edit weight/reps",
+                "Left/Right: move set cursor • W/F: +2.5/-2.5 kg • Up/Down/Tab: toggle weight/reps \
+                 • N: next exercise • E: previous • digits: edit weight/reps",
             ),
             daily_plans: Vec::new(),
         };
@@ -332,6 +332,8 @@ impl App {
             Command::PrevField => self.current_exercise_mut().focus_up(),
             Command::MoveLeft => self.on_move_left(),
             Command::MoveRight => self.on_move_right(),
+            Command::BumpWeightUp => self.current_exercise_mut().bump_current_set_weight(2.5),
+            Command::BumpWeightDown => self.current_exercise_mut().bump_current_set_weight(-2.5),
             Command::Digit(char) => self.apply_digit(char),
             Command::Backspace => self.apply_backspace(),
         }
@@ -515,6 +517,8 @@ enum Command {
     PrevField,
     MoveLeft,
     MoveRight,
+    BumpWeightUp,
+    BumpWeightDown,
     Digit(char),
     Backspace,
 }
@@ -530,6 +534,8 @@ impl Command {
             (_, KeyCode::Up) => Some(Self::PrevField),
             (_, KeyCode::Left) => Some(Self::MoveLeft),
             (_, KeyCode::Right) => Some(Self::MoveRight),
+            (_, KeyCode::Char('w') | KeyCode::Char('W')) => Some(Self::BumpWeightUp),
+            (_, KeyCode::Char('f') | KeyCode::Char('F')) => Some(Self::BumpWeightDown),
             (_, KeyCode::Tab | KeyCode::BackTab) => Some(Self::ToggleFocus),
             (_, KeyCode::Backspace) => Some(Self::Backspace),
             (_, KeyCode::Char(ch)) if ch.is_ascii_digit() => Some(Self::Digit(ch)),
@@ -642,6 +648,14 @@ impl ExerciseState {
         }
         let idx = self.set_cursor;
         self.update_set_weight(idx, WeightEntry::backspace);
+    }
+
+    fn bump_current_set_weight(&mut self, delta: f32) {
+        if self.set_cursor >= self.sets.len() {
+            return;
+        }
+        let idx = self.set_cursor;
+        self.update_set_weight(idx, |weight| weight.bump(delta));
     }
 
     fn update_set_weight<F>(&mut self, idx: usize, mut update: F)
@@ -776,6 +790,13 @@ impl WeightEntry {
 
     fn set_value(&mut self, value: f32) {
         self.value = (value * 10.0).round() / 10.0;
+        self.buffer = format!("{:.1}", self.value);
+        self.last_input = None;
+    }
+
+    fn bump(&mut self, delta: f32) {
+        let next = (self.value + delta).max(0.0);
+        self.value = (next * 10.0).round() / 10.0;
         self.buffer = format!("{:.1}", self.value);
         self.last_input = None;
     }
