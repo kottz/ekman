@@ -2,7 +2,7 @@ use chrono::{DateTime, Datelike, Duration as ChronoDuration, Local, Utc};
 use color_eyre::eyre::WrapErr;
 use crossterm::event::{self, Event, KeyCode, KeyEvent, KeyEventKind, KeyModifiers};
 use ekman_core::models::{
-    GraphPoint, GraphResponse, PopulatedExercise, PopulatedTemplate, SetCompact,
+    GraphRequest, GraphResponse, PopulatedExercise, PopulatedTemplate, SetCompact,
 };
 use ratatui::{
     DefaultTerminal, Frame,
@@ -13,14 +13,17 @@ use ratatui::{
     widgets::{Axis, Block, Cell, Chart, Dataset, GraphType, Paragraph, Row, Table},
 };
 use std::{
+    collections::HashSet,
     fmt::Write,
     time::{Duration, Instant},
 };
+use tokio::sync::mpsc;
 
 const INPUT_RESET_TIMEOUT: Duration = Duration::from_secs(1);
 
 const BACKEND_BASE_URL: &str = "http://localhost:3000";
 const DAILY_PLANS_PATH: &str = "/api/plans/daily";
+const EXERCISES_PATH: &str = "/api/exercises";
 
 const DUMMY_EXERCISES: &[ExerciseTemplate] = &[
     ExerciseTemplate {
@@ -43,17 +46,34 @@ struct ExerciseTemplate {
     starting_weight: f32,
 }
 
-fn main() -> color_eyre::Result<()> {
+#[derive(Debug)]
+enum IoEvent {
+    LoadDailyPlans,
+    LoadGraph(i64),
+}
+
+#[derive(Debug)]
+enum IoResponse {
+    DailyPlansLoaded(Vec<PopulatedTemplate>),
+    DailyPlansFailed(String),
+    GraphLoaded(GraphResponse),
+    GraphFailed { exercise_id: i64, message: String },
+}
+
+#[tokio::main]
+async fn main() -> color_eyre::Result<()> {
     color_eyre::install()?;
+    let (io_tx, io_rx) = mpsc::channel(16);
+    let (resp_tx, resp_rx) = mpsc::channel(16);
+    tokio::spawn(network_task(io_rx, resp_tx));
     let terminal = ratatui::init();
-    let result = App::new().run(terminal);
+    let result = App::new(io_tx, resp_rx).run(terminal).await;
     ratatui::restore();
     result
 }
 
 /// The main application which holds the state and logic of the application.
-#[derive(Debug)]
-pub struct App {
+struct App {
     running: bool,
     exercises: Vec<ExerciseState>,
     graphs: Vec<GraphResponse>,
@@ -62,19 +82,16 @@ pub struct App {
     backend_status: String,
     hints_line: String,
     daily_plans: Vec<PopulatedTemplate>,
-}
-
-impl Default for App {
-    fn default() -> Self {
-        Self::new()
-    }
+    io_tx: mpsc::Sender<IoEvent>,
+    io_rx: mpsc::Receiver<IoResponse>,
+    pending_graphs: HashSet<i64>,
 }
 
 impl App {
     /// Construct a new instance of [`App`].
-    pub fn new() -> Self {
+    fn new(io_tx: mpsc::Sender<IoEvent>, io_rx: mpsc::Receiver<IoResponse>) -> Self {
         let exercises = ExerciseState::defaults();
-        let graphs = demo_graphs();
+        let graphs = Vec::new();
 
         let mut app = Self {
             running: false,
@@ -89,18 +106,39 @@ impl App {
                  E: previous • digits: edit weight/reps",
             ),
             daily_plans: Vec::new(),
+            io_tx,
+            io_rx,
+            pending_graphs: HashSet::new(),
         };
         app.refresh_status();
         app
     }
 
     /// Run the application's main loop.
-    pub fn run(mut self, mut terminal: DefaultTerminal) -> color_eyre::Result<()> {
+    pub async fn run(mut self, mut terminal: DefaultTerminal) -> color_eyre::Result<()> {
         self.running = true;
-        self.load_daily_plans();
+        self.request_daily_plans();
+
+        let tick_rate = Duration::from_millis(16);
+        let mut last_tick = Instant::now();
+
         while self.running {
+            self.drain_backend_messages();
             terminal.draw(|frame| self.render(frame))?;
-            self.handle_crossterm_events()?;
+
+            let timeout = tick_rate.saturating_sub(last_tick.elapsed());
+            if event::poll(timeout)? {
+                match event::read()? {
+                    Event::Key(key) if key.kind == KeyEventKind::Press => self.on_key_event(key),
+                    Event::Mouse(_) => {}
+                    Event::Resize(_, _) => {}
+                    _ => {}
+                }
+            }
+
+            if last_tick.elapsed() >= tick_rate {
+                last_tick = Instant::now();
+            }
         }
         Ok(())
     }
@@ -305,15 +343,126 @@ impl App {
         frame.render_widget(status, area);
     }
 
-    /// Reads the crossterm events and updates the state of [`App`].
-    fn handle_crossterm_events(&mut self) -> color_eyre::Result<()> {
-        match event::read()? {
-            Event::Key(key) if key.kind == KeyEventKind::Press => self.on_key_event(key),
-            Event::Mouse(_) => {}
-            Event::Resize(_, _) => {}
-            _ => {}
+    fn drain_backend_messages(&mut self) {
+        while let Ok(message) = self.io_rx.try_recv() {
+            self.handle_backend_message(message);
         }
-        Ok(())
+    }
+
+    fn handle_backend_message(&mut self, message: IoResponse) {
+        match message {
+            IoResponse::DailyPlansLoaded(plans) => self.apply_daily_plans(plans),
+            IoResponse::DailyPlansFailed(message) => self.apply_daily_plans_error(message),
+            IoResponse::GraphLoaded(graph) => self.apply_graph(graph),
+            IoResponse::GraphFailed {
+                exercise_id,
+                message,
+            } => {
+                self.pending_graphs.remove(&exercise_id);
+                self.backend_status =
+                    format!("Backend: failed to load graph for {exercise_id}: {message}");
+            }
+        }
+    }
+
+    fn apply_daily_plans(&mut self, plans: Vec<PopulatedTemplate>) {
+        let selected_plan = select_plan_for_today(&plans).cloned();
+        self.daily_plans = plans;
+        self.pending_graphs.clear();
+        self.graphs.clear();
+
+        if let Some(plan) = selected_plan {
+            let exercises: Vec<_> = plan
+                .exercises
+                .iter()
+                .map(ExerciseState::from_populated_exercise)
+                .collect();
+            if exercises.is_empty() {
+                self.backend_status = "Backend: no exercises found in plans".to_string();
+                self.exercises = ExerciseState::defaults();
+                self.selected_exercise = 0;
+            } else {
+                self.backend_status = format!(
+                    "Backend: loaded {} plans (showing {})",
+                    self.daily_plans.len(),
+                    plan.name
+                );
+                self.exercises = exercises;
+                self.selected_exercise = 0;
+                self.request_graphs_for_plan();
+            }
+        } else {
+            self.backend_status = "Backend: no plans available".to_string();
+            self.exercises = ExerciseState::defaults();
+            self.daily_plans.clear();
+            self.selected_exercise = 0;
+        }
+        self.refresh_status();
+    }
+
+    fn apply_daily_plans_error(&mut self, message: String) {
+        self.backend_status = format!("Backend unavailable: {message}");
+        self.exercises = ExerciseState::defaults();
+        self.daily_plans.clear();
+        self.graphs.clear();
+        self.pending_graphs.clear();
+        self.selected_exercise = 0;
+        self.refresh_status();
+    }
+
+    fn apply_graph(&mut self, graph: GraphResponse) {
+        self.pending_graphs.remove(&graph.exercise_id);
+
+        if let Some(existing) = self
+            .graphs
+            .iter_mut()
+            .find(|current| current.exercise_id == graph.exercise_id)
+        {
+            *existing = graph;
+        } else {
+            self.graphs.push(graph);
+        }
+        self.refresh_status();
+    }
+
+    fn request_daily_plans(&mut self) {
+        self.backend_status = "Backend: loading daily plans...".to_string();
+        if let Err(err) = self.io_tx.try_send(IoEvent::LoadDailyPlans) {
+            self.backend_status = format!("Backend: failed to request plans: {err}");
+        }
+    }
+
+    fn request_graphs_for_plan(&mut self) {
+        let exercise_ids: Vec<i64> = self
+            .exercises
+            .iter()
+            .filter_map(|exercise| exercise.exercise_id)
+            .collect();
+
+        for id in exercise_ids {
+            self.queue_graph_request(id);
+        }
+    }
+
+    fn queue_graph_request(&mut self, exercise_id: i64) {
+        if self.pending_graphs.contains(&exercise_id)
+            || self
+                .graphs
+                .iter()
+                .any(|graph| graph.exercise_id == exercise_id)
+        {
+            return;
+        }
+
+        match self.io_tx.try_send(IoEvent::LoadGraph(exercise_id)) {
+            Ok(_) => {
+                self.pending_graphs.insert(exercise_id);
+            }
+            Err(err) => {
+                self.backend_status =
+                    format!("Backend: failed to queue graph request for {exercise_id}: {err}");
+            }
+        }
     }
 
     /// Handles the key events and updates the state of [`App`].
@@ -475,47 +624,8 @@ impl App {
         self.running = false;
     }
 
-    fn load_daily_plans(&mut self) {
-        match fetch_daily_plans() {
-            Ok(plans) => {
-                if let Some(plan) = select_plan_for_today(&plans) {
-                    let exercises: Vec<_> = plan
-                        .exercises
-                        .iter()
-                        .map(ExerciseState::from_populated_exercise)
-                        .collect();
-                    if exercises.is_empty() {
-                        self.backend_status = "Backend: no exercises found in plans".to_string();
-                        self.exercises = ExerciseState::defaults();
-                        self.daily_plans.clear();
-                    } else {
-                        self.backend_status = format!(
-                            "Backend: loaded {} plans (showing {})",
-                            plans.len(),
-                            plan.name
-                        );
-                        self.daily_plans = plans;
-                        self.exercises = exercises;
-                        self.selected_exercise = 0;
-                    }
-                } else {
-                    self.backend_status = "Backend: no plans available".to_string();
-                    self.exercises = ExerciseState::defaults();
-                    self.daily_plans.clear();
-                }
-            }
-            Err(error) => {
-                self.backend_status = format!("Backend unavailable: {error}");
-                self.exercises = ExerciseState::defaults();
-                self.selected_exercise = 0;
-                self.daily_plans.clear();
-            }
-        }
-        self.refresh_status();
-    }
-
     fn refresh_status(&mut self) {
-        if let Some(exercise) = self.exercises.get(self.selected_exercise) {
+        let exercise_id = if let Some(exercise) = self.exercises.get(self.selected_exercise) {
             let total_sets = exercise.sets.len().max(1);
             let current_set = (exercise.set_cursor + 1).min(total_sets);
             self.status_line = format!(
@@ -525,8 +635,14 @@ impl App {
                 current_set,
                 total_sets
             );
+            exercise.exercise_id
         } else {
             self.status_line.clear();
+            None
+        };
+
+        if let Some(id) = exercise_id {
+            self.queue_graph_request(id);
         }
     }
 
@@ -612,6 +728,7 @@ impl Command {
 
 #[derive(Debug, Clone)]
 struct ExerciseState {
+    exercise_id: Option<i64>,
     name: String,
     focus: InputFocus,
     sets: Vec<SetEntry>,
@@ -629,6 +746,7 @@ impl ExerciseState {
 
     fn from_template(template: &ExerciseTemplate) -> Self {
         Self::with_set_slots(
+            None,
             template.name.to_string(),
             template.starting_weight,
             4,
@@ -640,6 +758,7 @@ impl ExerciseState {
     fn from_populated_exercise(exercise: &PopulatedExercise) -> Self {
         let set_count = exercise.target_sets.unwrap_or(4).max(1) as usize;
         Self::with_set_slots(
+            Some(exercise.exercise_id),
             exercise.name.clone(),
             0.0,
             set_count,
@@ -649,6 +768,7 @@ impl ExerciseState {
     }
 
     fn with_set_slots(
+        exercise_id: Option<i64>,
         name: String,
         starting_weight: f32,
         set_count: usize,
@@ -675,6 +795,7 @@ impl ExerciseState {
         }
 
         Self {
+            exercise_id,
             name,
             focus: InputFocus::SetWeight,
             sets,
@@ -987,77 +1108,67 @@ fn should_prefill_weight(last_session_date: Option<DateTime<Utc>>) -> bool {
     })
 }
 
-/// Fetch daily workout plans from the backend API.
-fn fetch_daily_plans() -> color_eyre::Result<Vec<PopulatedTemplate>> {
-    let runtime = tokio::runtime::Runtime::new().wrap_err("failed to start async runtime")?;
-    runtime.block_on(async {
-        let client = reqwest::Client::new();
-        client
-            .get(format!("{BACKEND_BASE_URL}{DAILY_PLANS_PATH}"))
-            .send()
-            .await
-            .wrap_err("request to backend failed")?
-            .error_for_status()
-            .wrap_err("backend returned an error status")?
-            .json()
-            .await
-            .wrap_err("failed to parse backend response")
-    })
+async fn network_task(mut io_rx: mpsc::Receiver<IoEvent>, resp_tx: mpsc::Sender<IoResponse>) {
+    let client = reqwest::Client::new();
+
+    while let Some(event) = io_rx.recv().await {
+        match event {
+            IoEvent::LoadDailyPlans => {
+                let response = fetch_daily_plans(&client).await;
+                let message = match response {
+                    Ok(plans) => IoResponse::DailyPlansLoaded(plans),
+                    Err(err) => IoResponse::DailyPlansFailed(err.to_string()),
+                };
+                let _ = resp_tx.send(message).await;
+            }
+            IoEvent::LoadGraph(exercise_id) => {
+                let response = fetch_exercise_graph(&client, exercise_id).await;
+                let message = match response {
+                    Ok(graph) => IoResponse::GraphLoaded(graph),
+                    Err(err) => IoResponse::GraphFailed {
+                        exercise_id,
+                        message: err.to_string(),
+                    },
+                };
+                let _ = resp_tx.send(message).await;
+            }
+        }
+    }
 }
 
-fn demo_graphs() -> Vec<GraphResponse> {
-    vec![
-        GraphResponse {
-            exercise_id: 1,
-            exercise_name: "Back Squat".to_string(),
-            points: vec![
-                GraphPoint {
-                    date: "2024-09-01".to_string(),
-                    value: 60.0,
-                },
-                GraphPoint {
-                    date: "2024-09-08".to_string(),
-                    value: 65.0,
-                },
-                GraphPoint {
-                    date: "2024-09-15".to_string(),
-                    value: 67.5,
-                },
-                GraphPoint {
-                    date: "2024-09-22".to_string(),
-                    value: 70.0,
-                },
-                GraphPoint {
-                    date: "2024-09-29".to_string(),
-                    value: 72.5,
-                },
-            ],
-        },
-        GraphResponse {
-            exercise_id: 2,
-            exercise_name: "Bench Press".to_string(),
-            points: vec![
-                GraphPoint {
-                    date: "2024-09-01".to_string(),
-                    value: 45.0,
-                },
-                GraphPoint {
-                    date: "2024-09-08".to_string(),
-                    value: 47.5,
-                },
-                GraphPoint {
-                    date: "2024-09-15".to_string(),
-                    value: 50.0,
-                },
-                GraphPoint {
-                    date: "2024-09-22".to_string(),
-                    value: 52.5,
-                },
-                GraphPoint {
-                    date: "2024-09-29".to_string(),
-                    value: 55.0,
-                },
-            ],
-        },
-    ]
+/// Fetch daily workout plans from the backend API.
+async fn fetch_daily_plans(client: &reqwest::Client) -> color_eyre::Result<Vec<PopulatedTemplate>> {
+    client
+        .get(format!("{BACKEND_BASE_URL}{DAILY_PLANS_PATH}"))
+        .send()
+        .await
+        .wrap_err("request to backend failed")?
+        .error_for_status()
+        .wrap_err("backend returned an error status")?
+        .json()
+        .await
+        .wrap_err("failed to parse backend response")
+}
+
+async fn fetch_exercise_graph(
+    client: &reqwest::Client,
+    exercise_id: i64,
+) -> color_eyre::Result<GraphResponse> {
+    client
+        .get(format!(
+            "{BACKEND_BASE_URL}{EXERCISES_PATH}/{exercise_id}/graph"
+        ))
+        .query(&GraphRequest {
+            start: None,
+            end: None,
+            metric: None,
+        })
+        .send()
+        .await
+        .wrap_err_with(|| format!("graph request to backend failed for {exercise_id}"))?
+        .error_for_status()
+        .wrap_err("backend returned an error status")?
+        .json()
+        .await
+        .wrap_err("failed to parse backend response")
 }
