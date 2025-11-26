@@ -84,8 +84,8 @@ impl App {
             status_line: String::new(),
             backend_status: String::from("Backend: not loaded"),
             hints_line: String::from(
-                "Left/Right: adjust weight or move set cursor • Up/Down: move between weight/sets \
-                 • Tab: toggle focus • N: next exercise • E: previous • digits: edit fields",
+                "Left/Right: move set cursor • Up/Down/Tab: toggle weight/reps • N: next \
+                 exercise • E: previous • digits: edit weight/reps",
             ),
             daily_plans: Vec::new(),
         };
@@ -146,38 +146,36 @@ impl App {
         frame.render_widget(block.clone(), area);
         let inner = block.inner(area);
 
-        let inner_layout =
-            Layout::vertical([Constraint::Length(3), Constraint::Length(5)]).split(inner);
-
-        let weight_style = if selected && matches!(exercise.focus, InputFocus::Weight) {
-            Style::default().cyan().bold()
-        } else {
-            Style::default()
-        };
-        let weight_display = exercise.weight.display_value();
-        let weight = Paragraph::new(format!("Weight: {weight_display} kg"))
-            .style(weight_style)
-            .block(Block::bordered().title("Load"));
-        frame.render_widget(weight, inner_layout[0]);
-
-        let set_cells = exercise
+        let weight_cells = exercise
             .sets
             .iter()
             .enumerate()
             .map(|(set_idx, set)| {
-                let mut cell_text = String::new();
-                if let Some(value) = set.value {
-                    let _ = write!(cell_text, "{value}");
-                } else {
-                    cell_text.push_str("--");
+                let mut style = Style::default();
+                if selected
+                    && matches!(exercise.focus, InputFocus::SetWeight)
+                    && exercise.set_cursor == set_idx
+                {
+                    style = Style::default().yellow().bold();
                 }
+                let cell_text = format!("{} kg", set.weight.display_or_placeholder());
+                Cell::from(cell_text).style(style)
+            })
+            .collect::<Vec<_>>();
+
+        let reps_cells = exercise
+            .sets
+            .iter()
+            .enumerate()
+            .map(|(set_idx, set)| {
+                let mut cell_text = set.reps_display();
                 if let Some(started_at) = set.started_at {
                     let _ = write!(cell_text, "\n{}", started_at.format("%H:%M:%S"));
                 }
 
                 let mut style = Style::default();
                 if selected
-                    && matches!(exercise.focus, InputFocus::Sets)
+                    && matches!(exercise.focus, InputFocus::SetReps)
                     && exercise.set_cursor == set_idx
                 {
                     style = Style::default().yellow().bold();
@@ -186,13 +184,13 @@ impl App {
             })
             .collect::<Vec<_>>();
 
-        let col_count = set_cells.len().max(1);
+        let col_count = weight_cells.len().max(1);
         let col_width = (100 / col_count) as u16;
         let widths = vec![Constraint::Percentage(col_width); col_count];
-        let sets = Table::new(vec![Row::new(set_cells)], widths)
+        let sets = Table::new(vec![Row::new(weight_cells), Row::new(reps_cells)], widths)
             .column_spacing(1)
             .block(Block::bordered().title(format!("Sets ({})", exercise.sets.len().max(1))));
-        frame.render_widget(sets, inner_layout[1]);
+        frame.render_widget(sets, inner);
     }
 
     fn render_graphs(&self, frame: &mut Frame, area: Rect) {
@@ -342,18 +340,12 @@ impl App {
 
     fn on_move_left(&mut self) {
         let exercise = self.current_exercise_mut();
-        match exercise.focus {
-            InputFocus::Weight => exercise.bump_weight(-2.5),
-            InputFocus::Sets => exercise.move_set_cursor(-1),
-        }
+        exercise.move_set_cursor(-1);
     }
 
     fn on_move_right(&mut self) {
         let exercise = self.current_exercise_mut();
-        match exercise.focus {
-            InputFocus::Weight => exercise.bump_weight(2.5),
-            InputFocus::Sets => exercise.move_set_cursor(1),
-        }
+        exercise.move_set_cursor(1);
     }
 
     fn apply_digit(&mut self, ch: char) {
@@ -365,13 +357,13 @@ impl App {
             .exercises
             .get(self.selected_exercise)
             .map(|ex| ex.focus)
-            .unwrap_or(InputFocus::Weight);
+            .unwrap_or(InputFocus::SetWeight);
 
         match focus {
-            InputFocus::Weight => {
-                self.current_exercise_mut().push_weight_char(ch);
+            InputFocus::SetWeight => {
+                self.current_exercise_mut().push_set_weight_char(ch);
             }
-            InputFocus::Sets => {
+            InputFocus::SetReps => {
                 if self
                     .exercises
                     .get(self.selected_exercise)
@@ -379,7 +371,7 @@ impl App {
                 {
                     self.advance_set_cursor();
                 }
-                let should_advance = self.current_exercise_mut().push_set_char(ch);
+                let should_advance = self.current_exercise_mut().push_set_reps_char(ch);
                 if should_advance {
                     self.advance_set_cursor();
                 }
@@ -391,8 +383,8 @@ impl App {
     fn apply_backspace(&mut self) {
         let exercise = self.current_exercise_mut();
         match exercise.focus {
-            InputFocus::Weight => exercise.backspace_weight(),
-            InputFocus::Sets => exercise.backspace_set(),
+            InputFocus::SetWeight => exercise.backspace_set_weight(),
+            InputFocus::SetReps => exercise.backspace_set_reps(),
         }
     }
 
@@ -505,7 +497,7 @@ impl App {
         if current_idx + 1 < self.exercises.len() {
             self.selected_exercise += 1;
             if let Some(next) = self.exercises.get_mut(self.selected_exercise) {
-                next.focus = InputFocus::Sets;
+                next.focus = InputFocus::SetWeight;
                 next.set_cursor = 0;
                 next.reset_set_timer();
             }
@@ -550,10 +542,8 @@ impl Command {
 #[derive(Debug, Clone)]
 struct ExerciseState {
     name: String,
-    weight: WeightEntry,
     focus: InputFocus,
     sets: Vec<SetEntry>,
-    set_inputs: Vec<String>,
     set_cursor: usize,
     last_set_input: Option<Instant>,
 }
@@ -593,53 +583,36 @@ impl ExerciseState {
     ) -> Self {
         let slots = set_count.max(1);
         let mut sets = Vec::with_capacity(slots);
-        let mut set_inputs = Vec::with_capacity(slots);
 
         for idx in 0..slots {
             let reps = previous_sets.get(idx).map(|set| set.reps.max(0) as u32);
-            sets.push(SetEntry {
-                value: reps,
-                started_at: None,
-            });
-            set_inputs.push(reps.map(|val| val.to_string()).unwrap_or_default());
+            let weight_value = previous_sets
+                .get(idx)
+                .map(|set| set.weight as f32)
+                .unwrap_or(starting_weight);
+            let prefill_weight = previous_sets.get(idx).is_some();
+            sets.push(SetEntry::new(reps, weight_value, prefill_weight));
         }
 
         Self {
             name,
-            weight: WeightEntry::new(starting_weight),
-            focus: InputFocus::Weight,
+            focus: InputFocus::SetWeight,
             sets,
-            set_inputs,
             set_cursor: 0,
             last_set_input: None,
         }
     }
 
     fn toggle_focus(&mut self) {
-        self.focus = match self.focus {
-            InputFocus::Weight => InputFocus::Sets,
-            InputFocus::Sets => InputFocus::Weight,
-        };
-    }
-
-    fn bump_weight(&mut self, delta: f32) {
-        self.weight.bump(delta);
+        self.focus = self.focus.next();
     }
 
     fn focus_down(&mut self) {
-        self.focus = InputFocus::Sets;
+        self.focus = self.focus.next();
     }
 
     fn focus_up(&mut self) {
-        self.focus = InputFocus::Weight;
-    }
-
-    fn push_weight_char(&mut self, ch: char) {
-        self.weight.push_char(ch);
-    }
-
-    fn backspace_weight(&mut self) {
-        self.weight.backspace();
+        self.focus = self.focus.prev();
     }
 
     fn move_set_cursor(&mut self, delta: i32) {
@@ -652,7 +625,48 @@ impl ExerciseState {
         self.reset_set_timer();
     }
 
-    fn push_set_char(&mut self, ch: char) -> bool {
+    fn push_set_weight_char(&mut self, ch: char) {
+        if !(ch.is_ascii_digit() || ch == '.') {
+            return;
+        }
+        if self.set_cursor >= self.sets.len() {
+            return;
+        }
+        let idx = self.set_cursor;
+        self.update_set_weight(idx, |weight| weight.push_char(ch));
+    }
+
+    fn backspace_set_weight(&mut self) {
+        if self.set_cursor >= self.sets.len() {
+            return;
+        }
+        let idx = self.set_cursor;
+        self.update_set_weight(idx, WeightEntry::backspace);
+    }
+
+    fn update_set_weight<F>(&mut self, idx: usize, mut update: F)
+    where
+        F: FnMut(&mut WeightEntry),
+    {
+        if let Some(entry) = self.sets.get_mut(idx) {
+            update(&mut entry.weight);
+            let new_weight = entry.weight.value;
+            self.propagate_weight_to_open_sets(new_weight, idx);
+        }
+    }
+
+    fn propagate_weight_to_open_sets(&mut self, weight: f32, origin_idx: usize) {
+        for (idx, set) in self.sets.iter_mut().enumerate() {
+            if idx == origin_idx {
+                continue;
+            }
+            if set.reps.is_none() {
+                set.weight.set_value(weight);
+            }
+        }
+    }
+
+    fn push_set_reps_char(&mut self, ch: char) -> bool {
         if !ch.is_ascii_digit() {
             return false;
         }
@@ -660,7 +674,10 @@ impl ExerciseState {
             return false;
         }
         let idx = self.set_cursor;
-        let buffer = &mut self.set_inputs[idx];
+        let Some(set) = self.sets.get_mut(idx) else {
+            return false;
+        };
+        let buffer = &mut set.reps_input;
         let now = Instant::now();
         let should_reset = self
             .last_set_input
@@ -672,25 +689,28 @@ impl ExerciseState {
             buffer.clear();
             buffer.push(ch);
             let value = buffer.parse::<u32>().ok();
-            self.apply_set_value(idx, value);
+            self.apply_reps_value(idx, value);
             self.last_set_input = Some(now);
             return true;
         }
         buffer.push(ch);
         let value = buffer.parse::<u32>().ok();
-        self.apply_set_value(idx, value);
+        self.apply_reps_value(idx, value);
         self.last_set_input = Some(now);
         false
     }
 
-    fn backspace_set(&mut self) {
+    fn backspace_set_reps(&mut self) {
         if self.set_cursor >= self.sets.len() {
             return;
         }
         let idx = self.set_cursor;
-        let buffer = &mut self.set_inputs[idx];
+        let Some(set) = self.sets.get_mut(idx) else {
+            return;
+        };
+        let buffer = &mut set.reps_input;
         if buffer.pop().is_none() {
-            self.apply_set_value(idx, None);
+            self.apply_reps_value(idx, None);
             return;
         }
         let value = if buffer.is_empty() {
@@ -698,23 +718,23 @@ impl ExerciseState {
         } else {
             buffer.parse::<u32>().ok()
         };
-        self.apply_set_value(idx, value);
+        self.apply_reps_value(idx, value);
     }
 
-    fn apply_set_value(&mut self, idx: usize, value: Option<u32>) {
+    fn apply_reps_value(&mut self, idx: usize, value: Option<u32>) {
         if let Some(entry) = self.sets.get_mut(idx) {
             match value {
                 Some(v) => {
-                    if entry.value.is_none() {
+                    if entry.reps.is_none() {
                         entry.started_at = Some(Local::now());
                     }
-                    entry.value = Some(v);
-                    self.set_inputs[idx] = v.to_string();
+                    entry.reps = Some(v);
+                    entry.reps_input = v.to_string();
                 }
                 None => {
-                    entry.value = None;
+                    entry.reps = None;
                     entry.started_at = None;
-                    self.set_inputs[idx].clear();
+                    entry.reps_input.clear();
                 }
             }
         }
@@ -743,6 +763,28 @@ impl WeightEntry {
             value,
             buffer: format!("{value:.1}"),
             last_input: None,
+        }
+    }
+
+    fn new_unset(value: f32) -> Self {
+        Self {
+            value,
+            buffer: String::new(),
+            last_input: None,
+        }
+    }
+
+    fn set_value(&mut self, value: f32) {
+        self.value = (value * 10.0).round() / 10.0;
+        self.buffer = format!("{:.1}", self.value);
+        self.last_input = None;
+    }
+
+    fn display_or_placeholder(&self) -> String {
+        if self.buffer.is_empty() {
+            "__".to_string()
+        } else {
+            self.display_value()
         }
     }
 
@@ -776,31 +818,62 @@ impl WeightEntry {
         self.buffer.pop();
         self.value = self.buffer.parse::<f32>().unwrap_or(0.0);
     }
-
-    fn bump(&mut self, delta: f32) {
-        let next = (self.value + delta).max(0.0);
-        self.value = (next * 10.0).round() / 10.0;
-        self.buffer = format!("{:.1}", self.value);
-    }
 }
 
-#[derive(Debug, Default, Clone)]
+#[derive(Debug, Clone)]
 struct SetEntry {
-    value: Option<u32>,
+    reps: Option<u32>,
+    reps_input: String,
+    weight: WeightEntry,
     started_at: Option<DateTime<Local>>,
+}
+
+impl SetEntry {
+    fn new(reps: Option<u32>, weight: f32, prefill_weight: bool) -> Self {
+        Self {
+            reps,
+            reps_input: reps.map(|val| val.to_string()).unwrap_or_default(),
+            weight: if prefill_weight {
+                WeightEntry::new(weight)
+            } else {
+                WeightEntry::new_unset(weight)
+            },
+            started_at: None,
+        }
+    }
+
+    fn reps_display(&self) -> String {
+        self.reps
+            .map(|val| val.to_string())
+            .unwrap_or_else(|| "__".to_string())
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum InputFocus {
-    Weight,
-    Sets,
+    SetWeight,
+    SetReps,
 }
 
 impl InputFocus {
     fn label(self) -> &'static str {
         match self {
-            InputFocus::Weight => "Weight",
-            InputFocus::Sets => "Sets",
+            InputFocus::SetWeight => "Set Weight",
+            InputFocus::SetReps => "Set Reps",
+        }
+    }
+
+    fn next(self) -> Self {
+        match self {
+            InputFocus::SetWeight => InputFocus::SetReps,
+            InputFocus::SetReps => InputFocus::SetWeight,
+        }
+    }
+
+    fn prev(self) -> Self {
+        match self {
+            InputFocus::SetWeight => InputFocus::SetReps,
+            InputFocus::SetReps => InputFocus::SetWeight,
         }
     }
 }
