@@ -6,43 +6,24 @@ use axum::{
     http::StatusCode,
     response::IntoResponse,
 };
-use chrono::{Duration, NaiveDate, NaiveDateTime, Utc};
+use chrono::{Duration, NaiveDateTime, Utc};
 use turso::{Connection, Value};
 
 use crate::{
     AppState,
     db::{now_utc, parse_timestamp, serialize_timestamp},
     error::{AppError, AppResult},
+};
+use ekman_core::{
+    logic::{SetDataPoint, build_graph_points},
     models::{
-        CreateExerciseRequest, CreateSessionRequest, CreateSessionResponse, ExerciseResponse,
-        GraphPoint, GraphRequest, GraphResponse, PopulatedExercise, PopulatedTemplate, SetCompact,
+        CreateExerciseRequest, CreateSessionRequest, CreateSessionResponse, Exercise, GraphRequest,
+        GraphResponse, MetricKind, PopulatedExercise, PopulatedTemplate, SetCompact,
         UpdateExerciseRequest, UpdateSetRequest,
     },
 };
 
 const MAX_GRAPH_POINTS: usize = 50;
-
-#[derive(Clone, Copy, PartialEq, Eq)]
-enum MetricKind {
-    MaxWeight,
-    SessionTotalVolume,
-    BestSetVolume,
-    Est1Rm,
-}
-
-#[derive(Clone, Copy)]
-enum BucketMode {
-    Max,
-    Sum,
-}
-
-#[derive(Clone)]
-struct SetRow {
-    session_id: i64,
-    started_at: NaiveDateTime,
-    weight: f64,
-    reps: i32,
-}
 
 pub async fn get_daily_plans(
     State(state): State<AppState>,
@@ -114,14 +95,14 @@ pub async fn get_exercise_graph(
     Path(exercise_id): Path<i64>,
     Query(request): Query<GraphRequest>,
 ) -> AppResult<Json<GraphResponse>> {
-    let metric = metric_from_request(request.metric);
+    let metric = request.metric.unwrap_or(MetricKind::MaxWeight);
     let start_filter = parse_period(&request.period)?;
 
     let conn = state.db.connect()?;
     let exercise_name = fetch_exercise_name(&conn, exercise_id, state.default_user_id).await?;
     let sets = fetch_exercise_sets(&conn, exercise_id, state.default_user_id, start_filter).await?;
 
-    let points = build_graph_points(sets, metric);
+    let points = build_graph_points(sets, metric, MAX_GRAPH_POINTS);
 
     Ok(Json(GraphResponse {
         exercise_id,
@@ -243,9 +224,7 @@ pub async fn delete_set(
     Ok(StatusCode::NO_CONTENT)
 }
 
-pub async fn list_exercises(
-    State(state): State<AppState>,
-) -> AppResult<Json<Vec<ExerciseResponse>>> {
+pub async fn list_exercises(State(state): State<AppState>) -> AppResult<Json<Vec<Exercise>>> {
     let conn = state.db.connect()?;
     let mut rows = conn
         .query(
@@ -262,7 +241,7 @@ pub async fn list_exercises(
         let name: String = row.get(1)?;
         let description: Option<String> = row.get(2)?;
         let archived_value: i64 = row.get(3)?;
-        exercises.push(ExerciseResponse {
+        exercises.push(Exercise {
             id,
             name,
             description,
@@ -276,7 +255,7 @@ pub async fn list_exercises(
 pub async fn create_exercise(
     State(state): State<AppState>,
     Json(payload): Json<CreateExerciseRequest>,
-) -> AppResult<Json<ExerciseResponse>> {
+) -> AppResult<Json<Exercise>> {
     if payload.name.trim().is_empty() {
         return Err(AppError::BadRequest("name is required".to_string()));
     }
@@ -291,7 +270,7 @@ pub async fn create_exercise(
     .await?;
 
     let id = conn.last_insert_rowid();
-    Ok(Json(ExerciseResponse {
+    Ok(Json(Exercise {
         id,
         name,
         description,
@@ -426,15 +405,6 @@ async fn load_sets_for_session(
     Ok(sets)
 }
 
-fn metric_from_request(metric: Option<String>) -> MetricKind {
-    match metric.as_deref() {
-        Some("session_total_volume") => MetricKind::SessionTotalVolume,
-        Some("best_set_volume") => MetricKind::BestSetVolume,
-        Some("est_1rm") => MetricKind::Est1Rm,
-        _ => MetricKind::MaxWeight,
-    }
-}
-
 fn parse_period(period: &str) -> AppResult<Option<NaiveDateTime>> {
     let now = Utc::now().naive_utc();
     match period {
@@ -473,7 +443,7 @@ async fn fetch_exercise_sets(
     exercise_id: i64,
     user_id: i64,
     start: Option<NaiveDateTime>,
-) -> AppResult<Vec<SetRow>> {
+) -> AppResult<Vec<SetDataPoint>> {
     let mut sql = String::from(
         "SELECT ws.session_id, s.started_at, ws.weight_kg, ws.reps \
          FROM workout_sets ws \
@@ -495,95 +465,15 @@ async fn fetch_exercise_sets(
         let started_raw: String = row.get(1)?;
         let weight: f64 = row.get(2)?;
         let reps: i64 = row.get(3)?;
+        let started_at = parse_timestamp(&started_raw)?;
 
-        sets.push(SetRow {
+        sets.push(SetDataPoint {
             session_id,
-            started_at: parse_timestamp(&started_raw)?,
+            date: started_at.date(),
             weight,
             reps: reps as i32,
         });
     }
 
     Ok(sets)
-}
-
-fn build_graph_points(sets: Vec<SetRow>, metric: MetricKind) -> Vec<GraphPoint> {
-    if sets.is_empty() {
-        return Vec::new();
-    }
-
-    let mut grouped: HashMap<i64, Vec<SetRow>> = HashMap::new();
-    for set in sets {
-        grouped.entry(set.session_id).or_default().push(set);
-    }
-
-    let mut points: Vec<(NaiveDate, f64)> = grouped
-        .into_values()
-        .map(|session_sets| {
-            let date = session_sets
-                .first()
-                .map(|s| s.started_at.date())
-                .unwrap_or_else(|| Utc::now().date_naive());
-            let value = compute_metric(metric, &session_sets);
-            (date, value)
-        })
-        .collect();
-
-    points.sort_by_key(|(date, _)| *date);
-    let mode = match metric {
-        MetricKind::SessionTotalVolume | MetricKind::BestSetVolume => BucketMode::Sum,
-        MetricKind::MaxWeight | MetricKind::Est1Rm => BucketMode::Max,
-    };
-    downsample(points, mode)
-}
-
-fn compute_metric(metric: MetricKind, sets: &[SetRow]) -> f64 {
-    match metric {
-        MetricKind::MaxWeight => sets.iter().fold(0.0_f64, |acc, set| acc.max(set.weight)),
-        MetricKind::SessionTotalVolume => sets.iter().map(|set| set.weight * set.reps as f64).sum(),
-        MetricKind::BestSetVolume => sets
-            .iter()
-            .fold(0.0_f64, |acc, set| acc.max(set.weight * set.reps as f64)),
-        MetricKind::Est1Rm => sets.iter().fold(0.0_f64, |acc, set| {
-            acc.max(estimate_one_rm(set.weight, set.reps))
-        }),
-    }
-}
-
-fn estimate_one_rm(weight: f64, reps: i32) -> f64 {
-    // Epley formula provides a stable approximation for 1RM.
-    weight * (1.0 + reps as f64 / 30.0)
-}
-
-fn downsample(points: Vec<(NaiveDate, f64)>, mode: BucketMode) -> Vec<GraphPoint> {
-    if points.len() <= MAX_GRAPH_POINTS {
-        return points
-            .into_iter()
-            .map(|(date, value)| GraphPoint {
-                date: date.format("%Y-%m-%d").to_string(),
-                value,
-            })
-            .collect();
-    }
-
-    let bucket_size = points.len().div_ceil(MAX_GRAPH_POINTS);
-    let mut reduced = Vec::new();
-    for chunk in points.chunks(bucket_size) {
-        let date = chunk
-            .first()
-            .map(|(d, _)| *d)
-            .unwrap_or_else(|| Utc::now().date_naive());
-        let aggregated = match mode {
-            BucketMode::Max => chunk
-                .iter()
-                .fold(0.0_f64, |acc, (_, value)| acc.max(*value)),
-            BucketMode::Sum => chunk.iter().map(|(_, value)| *value).sum::<f64>(),
-        };
-        reduced.push(GraphPoint {
-            date: date.format("%Y-%m-%d").to_string(),
-            value: aggregated,
-        });
-    }
-
-    reduced
 }

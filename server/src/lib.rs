@@ -1,7 +1,6 @@
 mod db;
 mod error;
 mod handlers;
-mod models;
 
 use std::net::SocketAddr;
 
@@ -18,7 +17,7 @@ use tracing::info;
 
 pub use crate::db::{ensure_default_user, init_database};
 pub use crate::error::{AppError, AppResult};
-pub use crate::models::*;
+pub use ekman_core::models;
 
 #[derive(Debug, Deserialize)]
 struct ServerConfig {

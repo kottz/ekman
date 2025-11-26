@@ -1,6 +1,7 @@
 use chrono::{DateTime, Local};
 use color_eyre::eyre::WrapErr;
 use crossterm::event::{self, Event, KeyCode, KeyEvent, KeyEventKind, KeyModifiers};
+use ekman_core::models::PopulatedTemplate;
 use ratatui::{
     DefaultTerminal, Frame,
     layout::{Alignment, Constraint, Layout, Rect},
@@ -8,7 +9,6 @@ use ratatui::{
     text::Line,
     widgets::{Block, Cell, Paragraph, Row, Table},
 };
-use serde::Deserialize;
 use std::fmt::Write;
 
 const BACKEND_BASE_URL: &str = "http://localhost:3000";
@@ -33,21 +33,6 @@ const DUMMY_EXERCISES: &[ExerciseTemplate] = &[
 struct ExerciseTemplate {
     name: &'static str,
     starting_weight: f32,
-}
-
-#[allow(dead_code)]
-#[derive(Debug, Deserialize, Clone)]
-struct PopulatedTemplate {
-    name: String,
-    day_of_week: Option<i32>,
-    exercises: Vec<PopulatedExercise>,
-}
-
-#[allow(dead_code)]
-#[derive(Debug, Deserialize, Clone)]
-struct PopulatedExercise {
-    name: String,
-    target_sets: Option<i32>,
 }
 
 fn main() -> color_eyre::Result<()> {
