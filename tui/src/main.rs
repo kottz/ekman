@@ -84,8 +84,9 @@ impl App {
             status_line: String::new(),
             backend_status: String::from("Backend: not loaded"),
             hints_line: String::from(
-                "Left/Right: move set cursor • W/F: +2.5/-2.5 kg • Up/Down/Tab: toggle weight/reps \
-                 • N: next exercise • E: previous • digits: edit weight/reps",
+                "Left/Right: move set cursor • Tab: weight → reps → next set reps • Shift+Tab: \
+                 reverse • W/F: +2.5/-2.5 kg • Up/Down: toggle weight/reps • N: next exercise • \
+                 E: previous • digits: edit weight/reps",
             ),
             daily_plans: Vec::new(),
         };
@@ -327,11 +328,12 @@ impl App {
             Command::Quit => self.quit(),
             Command::NextListRow => self.move_exercise(1),
             Command::PrevListRow => self.move_exercise(-1),
-            Command::ToggleFocus => self.current_exercise_mut().toggle_focus(),
             Command::NextField => self.current_exercise_mut().focus_down(),
             Command::PrevField => self.current_exercise_mut().focus_up(),
             Command::MoveLeft => self.on_move_left(),
             Command::MoveRight => self.on_move_right(),
+            Command::NextSet => self.tab_next(),
+            Command::PrevSet => self.shift_tab_prev(),
             Command::BumpWeightUp => self.current_exercise_mut().bump_current_set_weight(2.5),
             Command::BumpWeightDown => self.current_exercise_mut().bump_current_set_weight(-2.5),
             Command::Digit(char) => self.apply_digit(char),
@@ -348,6 +350,67 @@ impl App {
     fn on_move_right(&mut self) {
         let exercise = self.current_exercise_mut();
         exercise.move_set_cursor(1);
+    }
+
+    fn tab_next(&mut self) {
+        if self.exercises.is_empty() {
+            return;
+        }
+        if let Some(exercise) = self.exercises.get_mut(self.selected_exercise) {
+            match exercise.focus {
+                InputFocus::SetWeight => {
+                    exercise.focus_down();
+                    return;
+                }
+                InputFocus::SetReps => {
+                    if exercise.set_cursor + 1 < exercise.sets.len() {
+                        exercise.set_cursor += 1;
+                        exercise.reset_set_timer();
+                        return;
+                    }
+                }
+            }
+        }
+        if self.selected_exercise + 1 < self.exercises.len() {
+            self.selected_exercise += 1;
+            if let Some(next) = self.exercises.get_mut(self.selected_exercise) {
+                next.focus = InputFocus::SetWeight;
+                next.set_cursor = 0;
+                next.reset_set_timer();
+            }
+        }
+    }
+
+    fn shift_tab_prev(&mut self) {
+        if self.exercises.is_empty() {
+            return;
+        }
+        if let Some(exercise) = self.exercises.get_mut(self.selected_exercise) {
+            match exercise.focus {
+                InputFocus::SetReps => {
+                    exercise.focus_up();
+                    return;
+                }
+                InputFocus::SetWeight => {
+                    if exercise.set_cursor > 0 {
+                        exercise.set_cursor -= 1;
+                        exercise.focus = InputFocus::SetReps;
+                        exercise.reset_set_timer();
+                        return;
+                    }
+                }
+            }
+        }
+        if self.selected_exercise > 0 {
+            self.selected_exercise -= 1;
+            if let Some(prev) = self.exercises.get_mut(self.selected_exercise) {
+                if !prev.sets.is_empty() {
+                    prev.set_cursor = prev.sets.len() - 1;
+                }
+                prev.focus = InputFocus::SetReps;
+                prev.reset_set_timer();
+            }
+        }
     }
 
     fn apply_digit(&mut self, ch: char) {
@@ -512,11 +575,12 @@ enum Command {
     Quit,
     NextListRow,
     PrevListRow,
-    ToggleFocus,
     NextField,
     PrevField,
     MoveLeft,
     MoveRight,
+    NextSet,
+    PrevSet,
     BumpWeightUp,
     BumpWeightDown,
     Digit(char),
@@ -534,9 +598,10 @@ impl Command {
             (_, KeyCode::Up) => Some(Self::PrevField),
             (_, KeyCode::Left) => Some(Self::MoveLeft),
             (_, KeyCode::Right) => Some(Self::MoveRight),
+            (_, KeyCode::Tab) => Some(Self::NextSet),
+            (_, KeyCode::BackTab) => Some(Self::PrevSet),
             (_, KeyCode::Char('w') | KeyCode::Char('W')) => Some(Self::BumpWeightUp),
             (_, KeyCode::Char('f') | KeyCode::Char('F')) => Some(Self::BumpWeightDown),
-            (_, KeyCode::Tab | KeyCode::BackTab) => Some(Self::ToggleFocus),
             (_, KeyCode::Backspace) => Some(Self::Backspace),
             (_, KeyCode::Char(ch)) if ch.is_ascii_digit() => Some(Self::Digit(ch)),
             (_, KeyCode::Char('.')) => Some(Self::Digit('.')),
@@ -616,10 +681,6 @@ impl ExerciseState {
             set_cursor: 0,
             last_set_input: None,
         }
-    }
-
-    fn toggle_focus(&mut self) {
-        self.focus = self.focus.next();
     }
 
     fn focus_down(&mut self) {
