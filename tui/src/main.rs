@@ -357,11 +357,35 @@ impl App {
     }
 
     fn apply_digit(&mut self, ch: char) {
-        let exercise = self.current_exercise_mut();
-        match exercise.focus {
-            InputFocus::Weight => exercise.push_weight_char(ch),
-            InputFocus::Sets => exercise.push_set_char(ch),
+        if self.exercises.is_empty() {
+            return;
         }
+
+        let focus = self
+            .exercises
+            .get(self.selected_exercise)
+            .map(|ex| ex.focus)
+            .unwrap_or(InputFocus::Weight);
+
+        match focus {
+            InputFocus::Weight => {
+                self.current_exercise_mut().push_weight_char(ch);
+            }
+            InputFocus::Sets => {
+                if self
+                    .exercises
+                    .get(self.selected_exercise)
+                    .is_some_and(ExerciseState::should_auto_advance_set)
+                {
+                    self.advance_set_cursor();
+                }
+                let should_advance = self.current_exercise_mut().push_set_char(ch);
+                if should_advance {
+                    self.advance_set_cursor();
+                }
+            }
+        }
+        self.refresh_status();
     }
 
     fn apply_backspace(&mut self) {
@@ -384,6 +408,9 @@ impl App {
             next = len - 1;
         }
         self.selected_exercise = next as usize;
+        if let Some(ex) = self.exercises.get_mut(self.selected_exercise) {
+            ex.reset_set_timer();
+        }
     }
 
     /// Set running to false to quit the application.
@@ -458,6 +485,32 @@ impl App {
             .get_mut(idx)
             .expect("selected exercise should exist")
     }
+
+    fn advance_set_cursor(&mut self) {
+        if self.exercises.is_empty() {
+            return;
+        }
+        let current_idx = self.selected_exercise;
+        let mut moved = false;
+        if let Some(exercise) = self.exercises.get_mut(current_idx) {
+            exercise.reset_set_timer();
+            if exercise.set_cursor + 1 < exercise.sets.len() {
+                exercise.set_cursor += 1;
+                moved = true;
+            }
+        }
+        if moved {
+            return;
+        }
+        if current_idx + 1 < self.exercises.len() {
+            self.selected_exercise += 1;
+            if let Some(next) = self.exercises.get_mut(self.selected_exercise) {
+                next.focus = InputFocus::Sets;
+                next.set_cursor = 0;
+                next.reset_set_timer();
+            }
+        }
+    }
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -502,6 +555,7 @@ struct ExerciseState {
     sets: Vec<SetEntry>,
     set_inputs: Vec<String>,
     set_cursor: usize,
+    last_set_input: Option<Instant>,
 }
 
 impl ExerciseState {
@@ -557,6 +611,7 @@ impl ExerciseState {
             sets,
             set_inputs,
             set_cursor: 0,
+            last_set_input: None,
         }
     }
 
@@ -594,20 +649,38 @@ impl ExerciseState {
         let len = self.sets.len() as i32;
         let next = (self.set_cursor as i32 + delta).clamp(0, len - 1);
         self.set_cursor = next as usize;
+        self.reset_set_timer();
     }
 
-    fn push_set_char(&mut self, ch: char) {
+    fn push_set_char(&mut self, ch: char) -> bool {
         if !ch.is_ascii_digit() {
-            return;
+            return false;
         }
         if self.set_cursor >= self.sets.len() {
-            return;
+            return false;
         }
         let idx = self.set_cursor;
         let buffer = &mut self.set_inputs[idx];
+        let now = Instant::now();
+        let should_reset = self
+            .last_set_input
+            .is_none_or(|last| now.duration_since(last) > INPUT_RESET_TIMEOUT);
+        if should_reset {
+            buffer.clear();
+        }
+        if buffer.is_empty() && ch > '2' {
+            buffer.clear();
+            buffer.push(ch);
+            let value = buffer.parse::<u32>().ok();
+            self.apply_set_value(idx, value);
+            self.last_set_input = Some(now);
+            return true;
+        }
         buffer.push(ch);
         let value = buffer.parse::<u32>().ok();
         self.apply_set_value(idx, value);
+        self.last_set_input = Some(now);
+        false
     }
 
     fn backspace_set(&mut self) {
@@ -645,6 +718,15 @@ impl ExerciseState {
                 }
             }
         }
+    }
+
+    fn should_auto_advance_set(&self) -> bool {
+        self.last_set_input
+            .is_some_and(|last| last.elapsed() > INPUT_RESET_TIMEOUT)
+    }
+
+    fn reset_set_timer(&mut self) {
+        self.last_set_input = None;
     }
 }
 
