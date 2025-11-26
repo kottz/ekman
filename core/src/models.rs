@@ -87,6 +87,7 @@ pub enum MetricKind {
     MaxWeight,
     SessionTotalVolume,
     BestSetVolume,
+    #[serde(rename = "est_1rm")]
     Est1Rm,
 }
 
@@ -107,4 +108,44 @@ pub struct GraphResponse {
     pub exercise_id: i64,
     pub exercise_name: String,
     pub points: Vec<GraphPoint>,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use serde_json;
+
+    #[test]
+    fn metric_kind_serializes_as_snake_case() {
+        assert_eq!(
+            serde_json::to_string(&MetricKind::MaxWeight).unwrap(),
+            "\"max_weight\""
+        );
+        assert_eq!(
+            serde_json::to_string(&MetricKind::SessionTotalVolume).unwrap(),
+            "\"session_total_volume\""
+        );
+        assert_eq!(
+            serde_json::to_string(&MetricKind::BestSetVolume).unwrap(),
+            "\"best_set_volume\""
+        );
+        assert_eq!(
+            serde_json::to_string(&MetricKind::Est1Rm).unwrap(),
+            "\"est_1rm\""
+        );
+    }
+
+    #[test]
+    fn graph_request_query_serializes_metric_snake_case() {
+        let encoded = serde_urlencoded::to_string(GraphRequest {
+            period: "1m".to_string(),
+            metric: Some(MetricKind::Est1Rm),
+        })
+        .unwrap();
+
+        assert!(
+            encoded.contains("metric=est_1rm"),
+            "expected metric to be serialized as snake_case, got {encoded}"
+        );
+    }
 }

@@ -1,7 +1,7 @@
-use chrono::{DateTime, Local};
+use chrono::{DateTime, Datelike, Local};
 use color_eyre::eyre::WrapErr;
 use crossterm::event::{self, Event, KeyCode, KeyEvent, KeyEventKind, KeyModifiers};
-use ekman_core::models::PopulatedTemplate;
+use ekman_core::models::{PopulatedExercise, PopulatedTemplate, SetCompact};
 use ratatui::{
     DefaultTerminal, Frame,
     layout::{Alignment, Constraint, Layout, Rect},
@@ -64,10 +64,7 @@ impl Default for App {
 impl App {
     /// Construct a new instance of [`App`].
     pub fn new() -> Self {
-        let exercises = DUMMY_EXERCISES
-            .iter()
-            .map(ExerciseState::from_template)
-            .collect();
+        let exercises = ExerciseState::defaults();
 
         let mut app = Self {
             running: false,
@@ -174,10 +171,12 @@ impl App {
             })
             .collect::<Vec<_>>();
 
-        let widths = vec![Constraint::Percentage(25); 4];
+        let col_count = set_cells.len().max(1);
+        let col_width = (100 / col_count) as u16;
+        let widths = vec![Constraint::Percentage(col_width); col_count];
         let sets = Table::new(vec![Row::new(set_cells)], widths)
             .column_spacing(1)
-            .block(Block::bordered().title("Sets (4)"));
+            .block(Block::bordered().title(format!("Sets ({})", exercise.sets.len().max(1))));
         frame.render_widget(sets, inner_layout[1]);
     }
 
@@ -281,22 +280,52 @@ impl App {
     fn load_daily_plans(&mut self) {
         match fetch_daily_plans() {
             Ok(plans) => {
-                self.backend_status = format!("Backend: loaded {} plans", plans.len());
-                self.daily_plans = plans;
+                if let Some(plan) = select_plan_for_today(&plans) {
+                    let exercises: Vec<_> = plan
+                        .exercises
+                        .iter()
+                        .map(ExerciseState::from_populated_exercise)
+                        .collect();
+                    if exercises.is_empty() {
+                        self.backend_status = "Backend: no exercises found in plans".to_string();
+                        self.exercises = ExerciseState::defaults();
+                        self.daily_plans.clear();
+                    } else {
+                        self.backend_status = format!(
+                            "Backend: loaded {} plans (showing {})",
+                            plans.len(),
+                            plan.name
+                        );
+                        self.daily_plans = plans;
+                        self.exercises = exercises;
+                        self.selected_exercise = 0;
+                    }
+                } else {
+                    self.backend_status = "Backend: no plans available".to_string();
+                    self.exercises = ExerciseState::defaults();
+                    self.daily_plans.clear();
+                }
             }
             Err(error) => {
                 self.backend_status = format!("Backend unavailable: {error}");
+                self.exercises = ExerciseState::defaults();
+                self.selected_exercise = 0;
+                self.daily_plans.clear();
             }
         }
+        self.refresh_status();
     }
 
     fn refresh_status(&mut self) {
         if let Some(exercise) = self.exercises.get(self.selected_exercise) {
+            let total_sets = exercise.sets.len().max(1);
+            let current_set = (exercise.set_cursor + 1).min(total_sets);
             self.status_line = format!(
-                "Selected: {} • Focus: {} • Set {}/4",
+                "Selected: {} • Focus: {} • Set {}/{}",
                 exercise.name,
                 exercise.focus.label(),
-                exercise.set_cursor + 1
+                current_set,
+                total_sets
             );
         } else {
             self.status_line.clear();
@@ -304,8 +333,15 @@ impl App {
     }
 
     fn current_exercise_mut(&mut self) -> &mut ExerciseState {
+        if self.exercises.is_empty() {
+            panic!("no exercises available");
+        }
+        let idx = self
+            .selected_exercise
+            .min(self.exercises.len().saturating_sub(1));
+        self.selected_exercise = idx;
         self.exercises
-            .get_mut(self.selected_exercise)
+            .get_mut(idx)
             .expect("selected exercise should exist")
     }
 }
@@ -349,19 +385,63 @@ struct ExerciseState {
     name: String,
     weight: WeightEntry,
     focus: InputFocus,
-    sets: [SetEntry; 4],
-    set_inputs: [String; 4],
+    sets: Vec<SetEntry>,
+    set_inputs: Vec<String>,
     set_cursor: usize,
 }
 
 impl ExerciseState {
+    fn defaults() -> Vec<Self> {
+        DUMMY_EXERCISES
+            .iter()
+            .map(ExerciseState::from_template)
+            .collect()
+    }
+
     fn from_template(template: &ExerciseTemplate) -> Self {
+        Self::with_set_slots(template.name.to_string(), template.starting_weight, 4, &[])
+    }
+
+    fn from_populated_exercise(exercise: &PopulatedExercise) -> Self {
+        let set_count = exercise.target_sets.unwrap_or(4).max(1) as usize;
+        let starting_weight = exercise
+            .last_session_sets
+            .first()
+            .map(|set| set.weight as f32)
+            .unwrap_or(0.0);
+        Self::with_set_slots(
+            exercise.name.clone(),
+            starting_weight,
+            set_count,
+            &exercise.last_session_sets,
+        )
+    }
+
+    fn with_set_slots(
+        name: String,
+        starting_weight: f32,
+        set_count: usize,
+        previous_sets: &[SetCompact],
+    ) -> Self {
+        let slots = set_count.max(1);
+        let mut sets = Vec::with_capacity(slots);
+        let mut set_inputs = Vec::with_capacity(slots);
+
+        for idx in 0..slots {
+            let reps = previous_sets.get(idx).map(|set| set.reps.max(0) as u32);
+            sets.push(SetEntry {
+                value: reps,
+                started_at: None,
+            });
+            set_inputs.push(reps.map(|val| val.to_string()).unwrap_or_default());
+        }
+
         Self {
-            name: template.name.to_string(),
-            weight: WeightEntry::new(template.starting_weight),
+            name,
+            weight: WeightEntry::new(starting_weight),
             focus: InputFocus::Weight,
-            sets: std::array::from_fn(|_| SetEntry::default()),
-            set_inputs: std::array::from_fn(|_| String::new()),
+            sets,
+            set_inputs,
             set_cursor: 0,
         }
     }
@@ -394,6 +474,9 @@ impl ExerciseState {
     }
 
     fn move_set_cursor(&mut self, delta: i32) {
+        if self.sets.is_empty() {
+            return;
+        }
         let len = self.sets.len() as i32;
         let next = (self.set_cursor as i32 + delta).clamp(0, len - 1);
         self.set_cursor = next as usize;
@@ -401,6 +484,9 @@ impl ExerciseState {
 
     fn push_set_char(&mut self, ch: char) {
         if !ch.is_ascii_digit() {
+            return;
+        }
+        if self.set_cursor >= self.sets.len() {
             return;
         }
         let idx = self.set_cursor;
@@ -411,6 +497,9 @@ impl ExerciseState {
     }
 
     fn backspace_set(&mut self) {
+        if self.set_cursor >= self.sets.len() {
+            return;
+        }
         let idx = self.set_cursor;
         let buffer = &mut self.set_inputs[idx];
         if buffer.pop().is_none() {
@@ -426,19 +515,20 @@ impl ExerciseState {
     }
 
     fn apply_set_value(&mut self, idx: usize, value: Option<u32>) {
-        let entry = &mut self.sets[idx];
-        match value {
-            Some(v) => {
-                if entry.value.is_none() {
-                    entry.started_at = Some(Local::now());
+        if let Some(entry) = self.sets.get_mut(idx) {
+            match value {
+                Some(v) => {
+                    if entry.value.is_none() {
+                        entry.started_at = Some(Local::now());
+                    }
+                    entry.value = Some(v);
+                    self.set_inputs[idx] = v.to_string();
                 }
-                entry.value = Some(v);
-                self.set_inputs[idx] = v.to_string();
-            }
-            None => {
-                entry.value = None;
-                entry.started_at = None;
-                self.set_inputs[idx].clear();
+                None => {
+                    entry.value = None;
+                    entry.started_at = None;
+                    self.set_inputs[idx].clear();
+                }
             }
         }
     }
@@ -507,6 +597,17 @@ impl InputFocus {
             InputFocus::Sets => "Sets",
         }
     }
+}
+
+fn select_plan_for_today(plans: &[PopulatedTemplate]) -> Option<&PopulatedTemplate> {
+    if plans.is_empty() {
+        return None;
+    }
+    let today = Local::now().weekday().num_days_from_monday() as i32;
+    plans
+        .iter()
+        .find(|plan| plan.day_of_week == Some(today))
+        .or_else(|| plans.first())
 }
 
 /// Fetch daily workout plans from the backend API.
