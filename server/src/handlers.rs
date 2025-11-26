@@ -96,7 +96,9 @@ pub async fn get_exercise_graph(
     Query(request): Query<GraphRequest>,
 ) -> AppResult<Json<GraphResponse>> {
     let metric = request.metric.unwrap_or(MetricKind::MaxWeight);
-    if let (Some(start), Some(end)) = (request.start, request.end) && start > end {
+    if let (Some(start), Some(end)) = (request.start, request.end)
+        && start > end
+    {
         return Err(AppError::BadRequest(
             "start must be before or equal to end".to_string(),
         ));

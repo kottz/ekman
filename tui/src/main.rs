@@ -1,13 +1,16 @@
 use chrono::{DateTime, Datelike, Local};
 use color_eyre::eyre::WrapErr;
 use crossterm::event::{self, Event, KeyCode, KeyEvent, KeyEventKind, KeyModifiers};
-use ekman_core::models::{PopulatedExercise, PopulatedTemplate, SetCompact};
+use ekman_core::models::{
+    GraphPoint, GraphResponse, PopulatedExercise, PopulatedTemplate, SetCompact,
+};
 use ratatui::{
     DefaultTerminal, Frame,
     layout::{Alignment, Constraint, Layout, Rect},
     style::{Style, Stylize},
+    symbols,
     text::Line,
-    widgets::{Block, Cell, Paragraph, Row, Table},
+    widgets::{Axis, Block, Cell, Chart, Dataset, GraphType, Paragraph, Row, Table},
 };
 use std::fmt::Write;
 
@@ -48,6 +51,7 @@ fn main() -> color_eyre::Result<()> {
 pub struct App {
     running: bool,
     exercises: Vec<ExerciseState>,
+    graphs: Vec<GraphResponse>,
     selected_exercise: usize,
     status_line: String,
     backend_status: String,
@@ -65,10 +69,12 @@ impl App {
     /// Construct a new instance of [`App`].
     pub fn new() -> Self {
         let exercises = ExerciseState::defaults();
+        let graphs = demo_graphs();
 
         let mut app = Self {
             running: false,
             exercises,
+            graphs,
             selected_exercise: 0,
             status_line: String::new(),
             backend_status: String::from("Backend: not loaded"),
@@ -97,7 +103,11 @@ impl App {
     fn render(&mut self, frame: &mut Frame) {
         let layout =
             Layout::vertical([Constraint::Min(0), Constraint::Length(4)]).split(frame.area());
-        self.render_exercises(frame, layout[0]);
+        let [graph_area, exercise_area] =
+            Layout::horizontal([Constraint::Percentage(50), Constraint::Percentage(50)])
+                .areas(layout[0]);
+        self.render_graphs(frame, graph_area);
+        self.render_exercises(frame, exercise_area);
         self.render_status(frame, layout[1]);
     }
 
@@ -178,6 +188,105 @@ impl App {
             .column_spacing(1)
             .block(Block::bordered().title(format!("Sets ({})", exercise.sets.len().max(1))));
         frame.render_widget(sets, inner_layout[1]);
+    }
+
+    fn render_graphs(&self, frame: &mut Frame, area: Rect) {
+        if self.graphs.is_empty() {
+            frame.render_widget(
+                Paragraph::new("No graph data loaded").block(Block::bordered().title("Progress")),
+                area,
+            );
+            return;
+        }
+
+        let constraints = vec![Constraint::Ratio(1, self.graphs.len() as u32); self.graphs.len()];
+        let rows = Layout::vertical(constraints).split(area);
+        for (graph, chunk) in self.graphs.iter().zip(rows.iter()) {
+            self.render_graph(frame, *chunk, graph);
+        }
+    }
+
+    fn render_graph(&self, frame: &mut Frame, area: Rect, graph: &GraphResponse) {
+        let data: Vec<(f64, f64)> = graph
+            .points
+            .iter()
+            .enumerate()
+            .map(|(idx, point)| (idx as f64, point.value))
+            .collect();
+
+        let (min_y, max_y) = data
+            .iter()
+            .map(|(_, value)| *value)
+            .fold((f64::MAX, f64::MIN), |(min, max), val| {
+                (val.min(min), val.max(max))
+            });
+        let (min_y, max_y) = if min_y == f64::MAX {
+            (0.0, 1.0)
+        } else {
+            (min_y, max_y)
+        };
+        let y_padding = ((max_y - min_y) * 0.1).max(1.0);
+        let y_bounds = [min_y - y_padding, max_y + y_padding];
+
+        let x_bounds = if data.is_empty() {
+            [0.0, 1.0]
+        } else {
+            [0.0, (data.len().saturating_sub(1) as f64).max(1.0)]
+        };
+
+        let labels = match graph.points.len() {
+            0 => vec!["".to_string(), "".to_string(), "".to_string()],
+            1 => {
+                let label = graph.points[0].date.clone();
+                vec![label.clone(), label.clone(), label]
+            }
+            len => {
+                let mid = len / 2;
+                vec![
+                    graph
+                        .points
+                        .first()
+                        .map(|p| p.date.clone())
+                        .unwrap_or_default(),
+                    graph
+                        .points
+                        .get(mid)
+                        .map(|p| p.date.clone())
+                        .unwrap_or_default(),
+                    graph
+                        .points
+                        .last()
+                        .map(|p| p.date.clone())
+                        .unwrap_or_default(),
+                ]
+            }
+        };
+
+        let dataset = Dataset::default()
+            .name(graph.exercise_name.clone())
+            .marker(symbols::Marker::Braille)
+            .graph_type(GraphType::Line)
+            .style(Style::default().cyan())
+            .data(&data);
+
+        let chart = Chart::new(vec![dataset])
+            .block(
+                Block::bordered().title(Line::from(format!("Progress • {}", graph.exercise_name))),
+            )
+            .x_axis(
+                Axis::default()
+                    .title("Sessions")
+                    .bounds(x_bounds)
+                    .labels(labels),
+            )
+            .y_axis(
+                Axis::default()
+                    .title("Weight / volume")
+                    .bounds(y_bounds)
+                    .labels([format!("{:.0}", y_bounds[0]), format!("{:.0}", y_bounds[1])]),
+            );
+
+        frame.render_widget(chart, area);
     }
 
     fn render_status(&self, frame: &mut Frame, area: Rect) {
@@ -626,4 +735,61 @@ fn fetch_daily_plans() -> color_eyre::Result<Vec<PopulatedTemplate>> {
             .await
             .wrap_err("failed to parse backend response")
     })
+}
+
+fn demo_graphs() -> Vec<GraphResponse> {
+    vec![
+        GraphResponse {
+            exercise_id: 1,
+            exercise_name: "Back Squat".to_string(),
+            points: vec![
+                GraphPoint {
+                    date: "2024-09-01".to_string(),
+                    value: 60.0,
+                },
+                GraphPoint {
+                    date: "2024-09-08".to_string(),
+                    value: 65.0,
+                },
+                GraphPoint {
+                    date: "2024-09-15".to_string(),
+                    value: 67.5,
+                },
+                GraphPoint {
+                    date: "2024-09-22".to_string(),
+                    value: 70.0,
+                },
+                GraphPoint {
+                    date: "2024-09-29".to_string(),
+                    value: 72.5,
+                },
+            ],
+        },
+        GraphResponse {
+            exercise_id: 2,
+            exercise_name: "Bench Press".to_string(),
+            points: vec![
+                GraphPoint {
+                    date: "2024-09-01".to_string(),
+                    value: 45.0,
+                },
+                GraphPoint {
+                    date: "2024-09-08".to_string(),
+                    value: 47.5,
+                },
+                GraphPoint {
+                    date: "2024-09-15".to_string(),
+                    value: 50.0,
+                },
+                GraphPoint {
+                    date: "2024-09-22".to_string(),
+                    value: 52.5,
+                },
+                GraphPoint {
+                    date: "2024-09-29".to_string(),
+                    value: 55.0,
+                },
+            ],
+        },
+    ]
 }
