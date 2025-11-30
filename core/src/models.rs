@@ -111,6 +111,40 @@ pub struct GraphResponse {
     pub points: Vec<GraphPoint>,
 }
 
+// Activity & streak models --------------------------------------------------
+
+#[derive(Debug, Deserialize, Serialize, Clone)]
+pub struct ActivityRequest {
+    pub start: Option<DateTime<Utc>>,
+    pub end: Option<DateTime<Utc>>,
+}
+
+#[derive(Debug, Serialize, Deserialize, Clone)]
+pub struct ActivityDay {
+    pub date: String,
+    pub sets_completed: i64,
+}
+
+#[derive(Debug, Serialize, Deserialize, Clone)]
+pub struct ActivityResponse {
+    pub days: Vec<ActivityDay>,
+}
+
+#[derive(Debug, Deserialize, Serialize, Clone)]
+pub struct UpsertSetRequest {
+    pub exercise_id: i64,
+    pub set_number: i32,
+    pub weight: f64,
+    pub reps: i32,
+    pub completed_at: Option<DateTime<Utc>>,
+}
+
+#[derive(Debug, Serialize, Deserialize, Clone)]
+pub struct UpsertSetResponse {
+    pub set_id: i64,
+    pub session_id: i64,
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -134,6 +168,25 @@ mod tests {
             serde_json::to_string(&MetricKind::Est1Rm).unwrap(),
             "\"est_1rm\""
         );
+    }
+
+    #[test]
+    fn activity_request_query_round_trip() {
+        let start = DateTime::parse_from_rfc3339("2024-03-10T00:00:00Z")
+            .unwrap()
+            .with_timezone(&Utc);
+        let end = DateTime::parse_from_rfc3339("2024-03-20T23:59:59Z")
+            .unwrap()
+            .with_timezone(&Utc);
+        let encoded = serde_urlencoded::to_string(ActivityRequest {
+            start: Some(start),
+            end: Some(end),
+        })
+        .unwrap();
+
+        let decoded: ActivityRequest = serde_urlencoded::from_str(&encoded).unwrap();
+        assert_eq!(decoded.start, Some(start));
+        assert_eq!(decoded.end, Some(end));
     }
 
     #[test]

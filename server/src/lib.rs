@@ -7,7 +7,7 @@ use std::net::SocketAddr;
 use axum::{
     Router,
     http::{HeaderValue, Method, header},
-    routing::{get, patch, post},
+    routing::{get, patch, post, put},
 };
 use config::Config;
 use serde::Deserialize;
@@ -46,11 +46,13 @@ pub struct AppState {
 pub fn build_router(state: AppState, cors_layer: CorsLayer) -> Router {
     Router::new()
         .route("/api/plans/daily", get(handlers::get_daily_plans))
+        .route("/api/activity/days", get(handlers::get_activity_days))
         .route(
             "/api/exercises/{id}/graph",
             get(handlers::get_exercise_graph),
         )
         .route("/api/sessions", post(handlers::create_session))
+        .route("/api/sets", put(handlers::upsert_set))
         .route(
             "/api/sets/{id}",
             patch(handlers::update_set).delete(handlers::delete_set),
@@ -95,7 +97,13 @@ fn build_cors_layer(origins: &[String]) -> AppResult<CorsLayer> {
         .collect::<Result<_, _>>()?;
 
     Ok(CorsLayer::new()
-        .allow_methods([Method::GET, Method::POST, Method::PATCH, Method::DELETE])
+        .allow_methods([
+            Method::GET,
+            Method::POST,
+            Method::PUT,
+            Method::PATCH,
+            Method::DELETE,
+        ])
         .allow_origin(allowed_origins)
         .allow_credentials(true)
         .allow_headers([header::CONTENT_TYPE, header::AUTHORIZATION, header::ACCEPT]))

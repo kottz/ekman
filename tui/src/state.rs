@@ -2,18 +2,23 @@
 
 use crate::io::{IoRequest, IoResponse};
 use chrono::{DateTime, Datelike, Duration as ChronoDuration, Local, Utc};
-use ekman_core::models::{GraphResponse, PopulatedExercise, PopulatedTemplate};
+use ekman_core::models::{
+    ActivityDay, ActivityRequest, GraphResponse, PopulatedExercise, PopulatedTemplate,
+    UpsertSetRequest,
+};
 use std::collections::HashSet;
 use std::time::{Duration, Instant};
 use tokio::sync::mpsc;
 
 const INPUT_TIMEOUT: Duration = Duration::from_secs(1);
+const ACTIVITY_WINDOW_DAYS: i64 = 21;
 
 /// Main application state.
 pub struct App {
     pub running: bool,
     pub exercises: Vec<ExerciseState>,
     pub graphs: Vec<GraphResponse>,
+    pub activity: Vec<ActivityDay>,
     pub selected: usize,
     pub status: StatusLine,
     io_tx: mpsc::Sender<IoRequest>,
@@ -27,6 +32,7 @@ impl App {
             running: true,
             exercises: ExerciseState::defaults(),
             graphs: Vec::new(),
+            activity: Vec::new(),
             selected: 0,
             status: StatusLine::default(),
             io_tx,
@@ -38,6 +44,26 @@ impl App {
     pub fn request_daily_plans(&mut self) {
         self.status.backend = "Loading plans...".into();
         let _ = self.io_tx.try_send(IoRequest::LoadDailyPlans);
+    }
+
+    pub fn request_activity_history(&mut self) {
+        let end_date = Utc::now().date_naive();
+        let start_date = end_date - ChronoDuration::days(ACTIVITY_WINDOW_DAYS.saturating_sub(1));
+
+        if let (Some(start), Some(end)) = (
+            start_date
+                .and_hms_opt(0, 0, 0)
+                .map(|dt| DateTime::<Utc>::from_naive_utc_and_offset(dt, Utc)),
+            end_date
+                .and_hms_opt(23, 59, 59)
+                .map(|dt| DateTime::<Utc>::from_naive_utc_and_offset(dt, Utc)),
+        ) {
+            let request = ActivityRequest {
+                start: Some(start),
+                end: Some(end),
+            };
+            let _ = self.io_tx.try_send(IoRequest::LoadActivityRange(request));
+        }
     }
 
     pub fn poll_io(&mut self) {
@@ -66,6 +92,33 @@ impl App {
                 self.pending_graphs.remove(&id);
                 self.status.backend = format!("Graph error for {id}: {e}");
             }
+            IoResponse::Activity(Ok(activity)) => {
+                self.activity = activity.days;
+            }
+            IoResponse::Activity(Err(e)) => {
+                self.activity.clear();
+                self.status.backend = format!("Activity error: {e}");
+            }
+            IoResponse::SetSaved {
+                exercise_id,
+                set_index,
+                result,
+            } => match result {
+                Ok(saved) => {
+                    if let Some(ex) = self
+                        .exercises
+                        .iter_mut()
+                        .find(|e| e.exercise_id == Some(exercise_id))
+                        && let Some(set) = ex.sets.get_mut(set_index)
+                    {
+                        set.remote_id = Some(saved.set_id);
+                        set.session_id = Some(saved.session_id);
+                    }
+                }
+                Err(e) => {
+                    self.status.backend = format!("Save set error: {e}");
+                }
+            },
         }
         self.refresh_status();
     }
@@ -117,10 +170,6 @@ impl App {
         if self.io_tx.try_send(IoRequest::LoadGraph(id)).is_ok() {
             self.pending_graphs.insert(id);
         }
-    }
-
-    pub fn current_exercise(&self) -> Option<&ExerciseState> {
-        self.exercises.get(self.selected)
     }
 
     pub fn current_exercise_mut(&mut self) -> Option<&mut ExerciseState> {
@@ -204,21 +253,41 @@ impl App {
     }
 
     pub fn input_digit(&mut self, ch: char) {
-        let Some(ex) = self.exercises.get_mut(self.selected) else {
+        let Some(focus) = self.exercises.get(self.selected).map(|ex| ex.focus) else {
             return;
         };
 
-        match ex.focus {
-            Focus::Weight => ex.push_weight_char(ch),
+        match focus {
+            Focus::Weight => {
+                if let Some(set_idx) = self.exercises.get_mut(self.selected).map(|ex| {
+                    let set_idx = ex.set_cursor;
+                    ex.push_weight_char(ch);
+                    set_idx
+                }) {
+                    self.sync_set(self.selected, set_idx);
+                }
+            }
             Focus::Reps => {
-                if ex.should_auto_advance() {
+                let target_exercise = self.selected;
+                if self
+                    .exercises
+                    .get(target_exercise)
+                    .is_some_and(|ex| ex.should_auto_advance())
+                {
                     self.advance_set();
                 }
+
+                let target_set = self
+                    .exercises
+                    .get(target_exercise)
+                    .map(|e| e.set_cursor)
+                    .unwrap_or(0);
                 let should_advance = self
                     .exercises
-                    .get_mut(self.selected)
+                    .get_mut(target_exercise)
                     .map(|e| e.push_reps_char(ch))
                     .unwrap_or(false);
+                self.sync_set(target_exercise, target_set);
                 if should_advance {
                     self.advance_set();
                 }
@@ -228,11 +297,14 @@ impl App {
     }
 
     pub fn backspace(&mut self) {
-        if let Some(ex) = self.exercises.get_mut(self.selected) {
+        if let Some(set_idx) = self.exercises.get_mut(self.selected).map(|ex| {
             match ex.focus {
                 Focus::Weight => ex.backspace_weight(),
                 Focus::Reps => ex.backspace_reps(),
-            }
+            };
+            ex.set_cursor
+        }) {
+            self.sync_set(self.selected, set_idx);
         }
         self.refresh_status();
     }
@@ -256,6 +328,36 @@ impl App {
                 next.reset_input_timer();
             }
         }
+    }
+
+    pub fn sync_set(&mut self, exercise_index: usize, set_index: usize) {
+        let Some(ex) = self.exercises.get(exercise_index) else {
+            return;
+        };
+        let Some(exercise_id) = ex.exercise_id else {
+            return;
+        };
+        let Some(set) = ex.sets.get(set_index) else {
+            return;
+        };
+        let Some(reps) = set.reps else {
+            return;
+        };
+
+        let completed_at = set.completed_at_utc().unwrap_or_else(Utc::now);
+        let request = UpsertSetRequest {
+            exercise_id,
+            set_number: set_index as i32 + 1,
+            weight: set.weight.value as f64,
+            reps: reps as i32,
+            completed_at: Some(completed_at),
+        };
+
+        let _ = self.io_tx.try_send(IoRequest::SaveSet {
+            exercise_id,
+            set_index,
+            request,
+        });
     }
 
     pub fn refresh_status(&mut self) {
@@ -493,6 +595,8 @@ pub struct SetEntry {
     pub reps_buffer: String,
     pub weight: WeightEntry,
     pub started_at: Option<DateTime<Local>>,
+    pub remote_id: Option<i64>,
+    pub session_id: Option<i64>,
 }
 
 impl SetEntry {
@@ -506,6 +610,8 @@ impl SetEntry {
                 WeightEntry::empty(weight)
             },
             started_at: None,
+            remote_id: None,
+            session_id: None,
         }
     }
 
@@ -525,6 +631,10 @@ impl SetEntry {
         self.reps
             .map(|r| r.to_string())
             .unwrap_or_else(|| "__".into())
+    }
+
+    pub fn completed_at_utc(&self) -> Option<DateTime<Utc>> {
+        self.started_at.map(|dt| dt.with_timezone(&Utc))
     }
 }
 

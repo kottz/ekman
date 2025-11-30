@@ -1,13 +1,14 @@
 //! UI rendering.
 
 use crate::state::{App, ExerciseState, Focus};
-use ekman_core::models::GraphResponse;
+use chrono::Utc;
+use ekman_core::models::{ActivityDay, GraphResponse};
 use ratatui::{
     Frame,
     layout::{Alignment, Constraint, Layout, Rect},
-    style::{Style, Stylize},
+    style::{Color, Style, Stylize},
     symbols,
-    text::Line,
+    text::{Line, Span},
     widgets::{Axis, Block, Cell, Chart, Dataset, GraphType, Paragraph, Row, Table},
 };
 use std::fmt::Write;
@@ -15,15 +16,55 @@ use std::fmt::Write;
 const HINTS: &str = "←/→: set cursor • Tab/Shift+Tab: navigate • ↑/↓: weight/reps • W/F: ±2.5kg • N/E: exercise • digits: edit • q: quit";
 
 pub fn render(app: &App, frame: &mut Frame) {
-    let [main, status] =
-        Layout::vertical([Constraint::Min(0), Constraint::Length(4)]).areas(frame.area());
+    let [activity, main, status] = Layout::vertical([
+        Constraint::Length(3),
+        Constraint::Min(0),
+        Constraint::Length(4),
+    ])
+    .areas(frame.area());
 
     let [graph_area, exercise_area] =
         Layout::horizontal([Constraint::Percentage(50), Constraint::Percentage(50)]).areas(main);
 
+    render_activity_bar(frame, activity, &app.activity);
     render_graphs(frame, graph_area, &app.graphs);
     render_exercises(frame, exercise_area, &app.exercises, app.selected);
     render_status(frame, status, &app.status.exercise, &app.status.backend);
+}
+
+fn render_activity_bar(frame: &mut Frame, area: Rect, days: &[ActivityDay]) {
+    if days.is_empty() {
+        frame.render_widget(
+            Paragraph::new("No activity data").block(Block::bordered().title("Activity")),
+            area,
+        );
+        return;
+    }
+
+    let today = Utc::now().date_naive().format("%Y-%m-%d").to_string();
+    let mut spans: Vec<Span> = Vec::with_capacity(days.len() * 2);
+
+    for (idx, day) in days.iter().enumerate() {
+        let color = match day.sets_completed {
+            c if c >= 9 => Color::Green,
+            c if c >= 1 => Color::Yellow,
+            _ => Color::Red,
+        };
+        let mut style = Style::default().fg(color);
+        if day.date == today {
+            style = style.bold();
+        }
+        spans.push(Span::styled("●", style));
+        if idx + 1 < days.len() {
+            spans.push(Span::raw(" "));
+        }
+    }
+
+    let content = Paragraph::new(Line::from(spans))
+        .block(Block::bordered().title("Activity"))
+        .alignment(Alignment::Center);
+
+    frame.render_widget(content, area);
 }
 
 fn render_graphs(frame: &mut Frame, area: Rect, graphs: &[GraphResponse]) {

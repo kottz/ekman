@@ -6,7 +6,7 @@ use axum::{
     http::StatusCode,
     response::IntoResponse,
 };
-use chrono::{DateTime, Utc};
+use chrono::{DateTime, Duration as ChronoDuration, NaiveDate, Utc};
 use turso::{Connection, Value};
 
 use crate::{
@@ -17,13 +17,15 @@ use crate::{
 use ekman_core::{
     logic::{SetDataPoint, build_graph_points},
     models::{
-        CreateExerciseRequest, CreateSessionRequest, CreateSessionResponse, Exercise, GraphRequest,
-        GraphResponse, MetricKind, PopulatedExercise, PopulatedTemplate, SetCompact,
-        UpdateExerciseRequest, UpdateSetRequest,
+        ActivityDay, ActivityRequest, ActivityResponse, CreateExerciseRequest,
+        CreateSessionRequest, CreateSessionResponse, Exercise, GraphRequest, GraphResponse,
+        MetricKind, PopulatedExercise, PopulatedTemplate, SetCompact, UpdateExerciseRequest,
+        UpdateSetRequest, UpsertSetRequest, UpsertSetResponse,
     },
 };
 
 const MAX_GRAPH_POINTS: usize = 50;
+const DEFAULT_ACTIVITY_DAYS: i64 = 21;
 
 pub async fn get_daily_plans(
     State(state): State<AppState>,
@@ -88,6 +90,90 @@ pub async fn get_daily_plans(
     }
 
     Ok(Json(templates_vec))
+}
+
+pub async fn get_activity_days(
+    State(state): State<AppState>,
+    Query(request): Query<ActivityRequest>,
+) -> AppResult<Json<ActivityResponse>> {
+    let end_dt = request.end.unwrap_or_else(now_utc);
+    let default_start = end_dt - ChronoDuration::days(DEFAULT_ACTIVITY_DAYS - 1);
+    let start_dt = request.start.unwrap_or(default_start);
+
+    let start_date = start_dt.date_naive();
+    let end_date = end_dt.date_naive();
+
+    if start_date > end_date {
+        return Err(AppError::BadRequest(
+            "start must be before or equal to end".to_string(),
+        ));
+    }
+
+    let conn = state.db.connect()?;
+    let counts = fetch_set_counts(&conn, state.default_user_id, start_date, end_date).await?;
+
+    let total_days = end_date.signed_duration_since(start_date).num_days().max(0);
+    let mut days = Vec::new();
+    for offset in 0..=total_days {
+        let date = start_date + ChronoDuration::days(offset);
+        let sets_completed = counts.get(&date).copied().unwrap_or(0);
+        days.push(ActivityDay {
+            date: date.format("%Y-%m-%d").to_string(),
+            sets_completed,
+        });
+    }
+
+    Ok(Json(ActivityResponse { days }))
+}
+
+pub async fn upsert_set(
+    State(state): State<AppState>,
+    Json(payload): Json<UpsertSetRequest>,
+) -> AppResult<Json<UpsertSetResponse>> {
+    if payload.set_number < 1 {
+        return Err(AppError::BadRequest(
+            "set_number must be at least 1".to_string(),
+        ));
+    }
+    if payload.reps < 1 {
+        return Err(AppError::BadRequest("reps must be at least 1".to_string()));
+    }
+    if payload.weight < 0.0 {
+        return Err(AppError::BadRequest(
+            "weight must be zero or greater".to_string(),
+        ));
+    }
+
+    let completed_at = payload.completed_at.unwrap_or_else(now_utc);
+    let mut conn = state.db.connect()?;
+    let session_id =
+        ensure_session_for_date(&mut conn, state.default_user_id, completed_at).await?;
+
+    conn.execute(
+        "INSERT INTO workout_sets (session_id, exercise_id, set_number, weight_kg, reps, completed_at) \
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6) \
+         ON CONFLICT(session_id, exercise_id, set_number) DO UPDATE SET \
+            weight_kg = excluded.weight_kg, reps = excluded.reps",
+        (
+            session_id,
+            payload.exercise_id,
+            payload.set_number,
+            payload.weight,
+            payload.reps,
+            serialize_timestamp(completed_at),
+        ),
+    )
+    .await?;
+
+    let set_id = fetch_set_id(
+        &mut conn,
+        session_id,
+        payload.exercise_id,
+        payload.set_number,
+    )
+    .await?;
+
+    Ok(Json(UpsertSetResponse { set_id, session_id }))
 }
 
 pub async fn get_exercise_graph(
@@ -416,6 +502,103 @@ async fn load_sets_for_session(
     }
 
     Ok(sets)
+}
+
+async fn fetch_set_counts(
+    conn: &Connection,
+    user_id: i64,
+    start_date: NaiveDate,
+    end_date: NaiveDate,
+) -> AppResult<HashMap<NaiveDate, i64>> {
+    let start_ts = DateTime::<Utc>::from_naive_utc_and_offset(
+        start_date
+            .and_hms_opt(0, 0, 0)
+            .ok_or_else(|| AppError::Internal("invalid start date".to_string()))?,
+        Utc,
+    );
+    let end_ts = DateTime::<Utc>::from_naive_utc_and_offset(
+        end_date
+            .and_hms_opt(23, 59, 59)
+            .ok_or_else(|| AppError::Internal("invalid end date".to_string()))?,
+        Utc,
+    );
+
+    let mut rows = conn
+        .query(
+            "SELECT DATE(ws.completed_at) as day, COUNT(*) \
+             FROM workout_sets ws \
+             JOIN sessions s ON s.id = ws.session_id \
+             WHERE s.user_id = ?1 AND ws.completed_at >= ?2 AND ws.completed_at <= ?3 \
+             GROUP BY day \
+             ORDER BY day",
+            (
+                user_id,
+                serialize_timestamp(start_ts),
+                serialize_timestamp(end_ts),
+            ),
+        )
+        .await?;
+
+    let mut counts = HashMap::new();
+    while let Some(row) = rows.next().await? {
+        let day_raw: String = row.get(0)?;
+        let count: i64 = row.get(1)?;
+        let date = NaiveDate::parse_from_str(&day_raw, "%Y-%m-%d").map_err(|err| {
+            AppError::Internal(format!("failed to parse date '{day_raw}': {err}"))
+        })?;
+        counts.insert(date, count);
+    }
+
+    Ok(counts)
+}
+
+async fn ensure_session_for_date(
+    conn: &mut Connection,
+    user_id: i64,
+    completed_at: DateTime<Utc>,
+) -> AppResult<i64> {
+    let day = completed_at.format("%Y-%m-%d").to_string();
+    let mut stmt = conn
+        .prepare(
+            "SELECT id FROM sessions \
+             WHERE user_id = ?1 AND DATE(started_at) = ?2 \
+             ORDER BY started_at DESC \
+             LIMIT 1",
+        )
+        .await?;
+
+    if let Ok(row) = stmt.query_row((user_id, day.as_str())).await {
+        let id: i64 = row.get(0)?;
+        return Ok(id);
+    }
+
+    conn.execute(
+        "INSERT INTO sessions (user_id, notes, started_at) VALUES (?1, NULL, ?2)",
+        (user_id, serialize_timestamp(completed_at)),
+    )
+    .await?;
+
+    Ok(conn.last_insert_rowid())
+}
+
+async fn fetch_set_id(
+    conn: &mut Connection,
+    session_id: i64,
+    exercise_id: i64,
+    set_number: i32,
+) -> AppResult<i64> {
+    let mut stmt = conn
+        .prepare(
+            "SELECT id FROM workout_sets \
+             WHERE session_id = ?1 AND exercise_id = ?2 AND set_number = ?3",
+        )
+        .await?;
+
+    let row = stmt
+        .query_row((session_id, exercise_id, set_number))
+        .await?;
+    let set_id: i64 = row.get(0)?;
+    Ok(set_id)
 }
 
 async fn fetch_exercise_name(

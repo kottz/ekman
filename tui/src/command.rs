@@ -44,6 +44,7 @@ impl FromStr for Command {
 
 impl Command {
     /// Returns the canonical name for this command.
+    #[allow(dead_code)]
     pub fn name(self) -> &'static str {
         match self {
             Self::Quit => "quit",

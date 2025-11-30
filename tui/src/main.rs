@@ -24,6 +24,7 @@ async fn main() -> color_eyre::Result<()> {
     let mut app = App::new(io_tx, io_rx);
 
     app.request_daily_plans();
+    app.request_activity_history();
     app.refresh_status();
 
     let mut terminal = ratatui::init();
@@ -94,14 +95,22 @@ fn execute(app: &mut App, cmd: Command) {
         Command::NextSet => app.tab_next(),
         Command::PrevSet => app.tab_prev(),
         Command::BumpWeightUp => {
-            if let Some(ex) = app.current_exercise_mut() {
+            if let Some(set_idx) = app.current_exercise_mut().map(|ex| {
+                let set_idx = ex.set_cursor;
                 ex.bump_weight(2.5);
+                set_idx
+            }) {
+                app.sync_set(app.selected, set_idx);
             }
             app.refresh_status();
         }
         Command::BumpWeightDown => {
-            if let Some(ex) = app.current_exercise_mut() {
+            if let Some(set_idx) = app.current_exercise_mut().map(|ex| {
+                let set_idx = ex.set_cursor;
                 ex.bump_weight(-2.5);
+                set_idx
+            }) {
+                app.sync_set(app.selected, set_idx);
             }
             app.refresh_status();
         }
