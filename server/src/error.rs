@@ -10,6 +10,8 @@ pub type AppResult<T> = Result<T, AppError>;
 
 #[derive(Debug, Error)]
 pub enum AppError {
+    #[error("unauthorized")]
+    Unauthorized,
     #[error("not found: {0}")]
     NotFound(String),
     #[error("bad request: {0}")]
@@ -30,6 +32,7 @@ impl IntoResponse for AppError {
         let status = match self {
             AppError::BadRequest(_) => StatusCode::BAD_REQUEST,
             AppError::NotFound(_) => StatusCode::NOT_FOUND,
+            AppError::Unauthorized => StatusCode::UNAUTHORIZED,
             AppError::Database(_) | AppError::Internal(_) => StatusCode::INTERNAL_SERVER_ERROR,
         };
 

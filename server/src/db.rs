@@ -8,6 +8,9 @@ CREATE TABLE IF NOT EXISTS users (
     id INTEGER PRIMARY KEY NOT NULL,
     username TEXT NOT NULL UNIQUE,
     password_hash TEXT NOT NULL,
+    password_salt TEXT NOT NULL,
+    totp_secret TEXT NOT NULL,
+    totp_enabled BOOLEAN NOT NULL DEFAULT TRUE,
     created_at DATETIME DEFAULT CURRENT_TIMESTAMP
 );
 
@@ -60,6 +63,18 @@ CREATE TABLE IF NOT EXISTS workout_sets (
 
 CREATE INDEX IF NOT EXISTS idx_sets_session ON workout_sets(session_id);
 CREATE INDEX IF NOT EXISTS idx_sets_exercise_time ON workout_sets(exercise_id, completed_at);
+
+CREATE TABLE IF NOT EXISTS auth_sessions (
+    id INTEGER PRIMARY KEY NOT NULL,
+    user_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+    token TEXT NOT NULL UNIQUE,
+    expires_at DATETIME NOT NULL,
+    last_used_at DATETIME NOT NULL,
+    created_at DATETIME DEFAULT CURRENT_TIMESTAMP
+);
+
+CREATE INDEX IF NOT EXISTS idx_auth_sessions_token ON auth_sessions(token);
+CREATE INDEX IF NOT EXISTS idx_auth_sessions_user ON auth_sessions(user_id);
 "#;
 
 pub async fn init_database(path: &str) -> AppResult<Database> {
@@ -67,23 +82,6 @@ pub async fn init_database(path: &str) -> AppResult<Database> {
     let conn = db.connect()?;
     conn.execute_batch(MIGRATIONS).await?;
     Ok(db)
-}
-
-pub async fn ensure_default_user(db: &Database, username: &str) -> AppResult<i64> {
-    let conn = db.connect()?;
-    let password_placeholder = "placeholder-hash";
-    conn.execute(
-        "INSERT OR IGNORE INTO users (username, password_hash) VALUES (?1, ?2)",
-        (username, password_placeholder),
-    )
-    .await?;
-
-    let mut stmt = conn
-        .prepare("SELECT id FROM users WHERE username = ?1")
-        .await?;
-    let row = stmt.query_row([username]).await?;
-    let id: i64 = row.get(0)?;
-    Ok(id)
 }
 
 pub fn serialize_timestamp(dt: DateTime<Utc>) -> String {

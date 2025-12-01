@@ -1,21 +1,28 @@
 //! UI rendering.
 
-use crate::state::{App, ExerciseState, Focus};
+use crate::state::{App, AuthField, AuthMode, ExerciseState, Focus};
 use chrono::Utc;
 use ekman_core::models::{ActivityDay, GraphResponse};
+use qrcode::QrCode;
 use ratatui::{
     Frame,
     layout::{Alignment, Constraint, Layout, Rect},
-    style::{Color, Style, Stylize},
+    style::{Color, Modifier, Style, Stylize},
     symbols,
     text::{Line, Span},
     widgets::{Axis, Block, Cell, Chart, Dataset, GraphType, Paragraph, Row, Table},
 };
 use std::fmt::Write;
+use tui_qrcode::{Colors, QrCodeWidget};
 
 const HINTS: &str = "←/→: set cursor • Tab/Shift+Tab: navigate • ↑/↓: weight/reps • W/F: ±2.5kg • N/E: exercise • digits: edit • q: quit";
 
 pub fn render(app: &App, frame: &mut Frame) {
+    if !app.is_authenticated() {
+        render_auth(app, frame);
+        return;
+    }
+
     let [activity, main, status] = Layout::vertical([
         Constraint::Length(3),
         Constraint::Min(0),
@@ -30,6 +37,202 @@ pub fn render(app: &App, frame: &mut Frame) {
     render_graphs(frame, graph_area, &app.graphs);
     render_exercises(frame, exercise_area, &app.exercises, app.selected);
     render_status(frame, status, &app.status.exercise, &app.status.backend);
+}
+
+fn render_auth(app: &App, frame: &mut Frame) {
+    let [header, body, footer] = Layout::vertical([
+        Constraint::Length(3),
+        Constraint::Min(12),
+        Constraint::Length(3),
+    ])
+    .areas(frame.area());
+
+    render_auth_header(frame, header, app);
+    render_auth_body(frame, body, app);
+    render_auth_footer(frame, footer, app);
+}
+
+fn render_auth_header(frame: &mut Frame, area: Rect, app: &App) {
+    let title = match app.auth.mode {
+        AuthMode::Login => "Login",
+        AuthMode::Register => "Register",
+    };
+
+    let tabs = Line::from(vec![
+        Span::styled(
+            " Login ",
+            if app.auth.mode == AuthMode::Login {
+                Style::default().bold().green()
+            } else {
+                Style::default().dim()
+            },
+        ),
+        Span::raw(" • "),
+        Span::styled(
+            " Register ",
+            if app.auth.mode == AuthMode::Register {
+                Style::default().bold().cyan()
+            } else {
+                Style::default().dim()
+            },
+        ),
+    ]);
+
+    let block = Block::bordered()
+        .title(format!("Ekman • {title}"))
+        .title_alignment(Alignment::Center);
+    let inner = block.inner(area);
+    frame.render_widget(block, area);
+    frame.render_widget(Paragraph::new(tabs).alignment(Alignment::Center), inner);
+}
+
+fn render_auth_body(frame: &mut Frame, area: Rect, app: &App) {
+    let columns: [Rect; 2] = Layout::horizontal([
+        Constraint::Percentage(if app.auth.mode == AuthMode::Register {
+            55
+        } else {
+            70
+        }),
+        Constraint::Percentage(if app.auth.mode == AuthMode::Register {
+            45
+        } else {
+            30
+        }),
+    ])
+    .areas(area);
+
+    render_auth_form(frame, columns[0], app);
+
+    if app.auth.mode == AuthMode::Register {
+        render_auth_qr(frame, columns[1], app);
+    } else {
+        render_auth_help(frame, columns[1]);
+    }
+}
+
+fn render_auth_form(frame: &mut Frame, area: Rect, app: &App) {
+    let auth = &app.auth;
+    let mut lines = Vec::new();
+
+    lines.push(field_line(
+        "Username",
+        &auth.username,
+        auth.focus == AuthField::Username,
+        false,
+    ));
+    lines.push(field_line(
+        "Password",
+        &auth.password,
+        auth.focus == AuthField::Password,
+        true,
+    ));
+    lines.push(field_line(
+        "TOTP code",
+        &auth.totp_code,
+        auth.focus == AuthField::Totp,
+        false,
+    ));
+
+    if auth.mode == AuthMode::Register {
+        lines.push(Line::from(""));
+        lines.push(Line::from(vec![
+            Span::styled("Secret: ", Style::default().bold()),
+            Span::raw(auth.totp_secret.clone()),
+        ]));
+        lines.push(Line::from(vec![
+            Span::styled("otpauth:// ", Style::default().bold()),
+            Span::raw(auth.otpauth_url.clone()),
+        ]));
+    }
+
+    let block = Block::bordered().title(match auth.mode {
+        AuthMode::Login => "Enter credentials",
+        AuthMode::Register => "Create account (2FA required)",
+    });
+
+    frame.render_widget(
+        Paragraph::new(lines)
+            .block(block)
+            .alignment(Alignment::Left),
+        area,
+    );
+}
+
+fn render_auth_qr(frame: &mut Frame, area: Rect, app: &App) {
+    let chunks: [Rect; 2] =
+        Layout::vertical([Constraint::Min(10), Constraint::Length(5)]).areas(area);
+    let qr_block = Block::bordered().title("Scan QR in your authenticator");
+    let qr_inner = qr_block.inner(chunks[0]);
+    frame.render_widget(qr_block, chunks[0]);
+
+    match QrCode::new(app.auth.otpauth_url.as_bytes()) {
+        Ok(code) => {
+            let widget = QrCodeWidget::new(code).colors(Colors::Inverted);
+            frame.render_widget(widget, qr_inner);
+        }
+        Err(_) => frame.render_widget(
+            Paragraph::new("Unable to render QR").alignment(Alignment::Center),
+            qr_inner,
+        ),
+    }
+
+    let info = Paragraph::new(vec![
+        Line::from("1) Scan the QR code."),
+        Line::from("2) Enter the current 6-digit code from your app."),
+        Line::from("Ctrl+G to generate a new secret."),
+    ])
+    .block(Block::bordered().title("Instructions"));
+
+    frame.render_widget(info, chunks[1]);
+}
+
+fn render_auth_help(frame: &mut Frame, area: Rect) {
+    let help = Paragraph::new(vec![
+        Line::from("Enter username, password, and 6-digit TOTP code."),
+        Line::from("Ctrl+R to jump to register."),
+        Line::from("Tab/Shift+Tab to move fields, Enter to submit."),
+    ])
+    .block(Block::bordered().title("Help"));
+
+    frame.render_widget(help, area);
+}
+
+fn render_auth_footer(frame: &mut Frame, area: Rect, app: &App) {
+    let status = if !app.auth.status.is_empty() {
+        app.auth.status.clone()
+    } else {
+        "Ctrl+L login • Ctrl+R register • Ctrl+G new secret • Esc quits".into()
+    };
+    frame.render_widget(
+        Paragraph::new(status)
+            .alignment(Alignment::Center)
+            .block(Block::bordered()),
+        area,
+    );
+}
+
+fn field_line(label: &str, value: &str, focused: bool, mask: bool) -> Line<'static> {
+    let mut display = if mask {
+        "•".repeat(value.chars().count())
+    } else {
+        value.to_string()
+    };
+    if display.is_empty() {
+        display = "_".repeat(6);
+    }
+
+    let mut spans = vec![
+        Span::styled(format!("{label}: "), Style::default().bold()),
+        Span::raw(display),
+    ];
+
+    if focused {
+        for span in spans.iter_mut() {
+            span.style = span.style.fg(Color::Yellow).add_modifier(Modifier::BOLD);
+        }
+    }
+
+    Line::from(spans)
 }
 
 fn render_activity_bar(frame: &mut Frame, area: Rect, days: &[ActivityDay]) {

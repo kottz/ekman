@@ -145,6 +145,48 @@ pub struct UpsertSetResponse {
     pub session_id: i64,
 }
 
+// Auth & sessions -----------------------------------------------------------
+
+#[derive(Debug, Deserialize, Serialize, Clone)]
+pub struct RegisterRequest {
+    pub username: String,
+    pub password: String,
+    pub totp_secret: String,
+    pub totp_code: String,
+}
+
+#[derive(Debug, Deserialize, Serialize, Clone)]
+pub struct LoginRequest {
+    pub username: String,
+    pub password: String,
+    pub totp: Option<String>,
+}
+
+#[derive(Debug, Serialize, Deserialize, Clone)]
+pub struct LoginResponse {
+    pub user_id: i64,
+    pub username: String,
+    pub expires_at: DateTime<Utc>,
+}
+
+#[derive(Debug, Serialize, Deserialize, Clone)]
+pub struct MeResponse {
+    pub user_id: i64,
+    pub username: String,
+    pub totp_enabled: bool,
+}
+
+#[derive(Debug, Deserialize, Serialize, Clone)]
+pub struct TotpSetupResponse {
+    pub secret: String,
+    pub otpauth_url: String,
+}
+
+#[derive(Debug, Deserialize, Serialize, Clone)]
+pub struct TotpVerifyRequest {
+    pub code: String,
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

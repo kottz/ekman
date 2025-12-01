@@ -15,7 +15,7 @@ use tokio::net::TcpListener;
 use tower_http::{compression::CompressionLayer, cors::CorsLayer, trace::TraceLayer};
 use tracing::info;
 
-pub use crate::db::{ensure_default_user, init_database};
+pub use crate::db::init_database;
 pub use crate::error::{AppError, AppResult};
 pub use ekman_core::models;
 
@@ -28,7 +28,6 @@ struct ServerConfig {
 #[derive(Debug, Deserialize)]
 struct DatabaseConfig {
     path: String,
-    default_username: String,
 }
 
 #[derive(Debug, Deserialize)]
@@ -40,13 +39,18 @@ struct AppConfig {
 #[derive(Clone)]
 pub struct AppState {
     pub db: turso::Database,
-    pub default_user_id: i64,
 }
 
 pub fn build_router(state: AppState, cors_layer: CorsLayer) -> Router {
     Router::new()
         .route("/api/plans/daily", get(handlers::get_daily_plans))
         .route("/api/activity/days", get(handlers::get_activity_days))
+        .route("/api/auth/register", post(handlers::register))
+        .route("/api/auth/login", post(handlers::login))
+        .route("/api/auth/logout", post(handlers::logout))
+        .route("/api/auth/me", get(handlers::me))
+        .route("/api/auth/totp/setup", get(handlers::totp_setup))
+        .route("/api/auth/totp/enable", post(handlers::totp_enable))
         .route(
             "/api/exercises/{id}/graph",
             get(handlers::get_exercise_graph),
@@ -116,21 +120,14 @@ pub async fn run() -> AppResult<()> {
     let cors_layer = build_cors_layer(&app_config.server.cors_origins)?;
 
     let db = init_database(&app_config.database.path).await?;
-    let user_id = ensure_default_user(&db, &app_config.database.default_username).await?;
 
-    let app = build_router(
-        AppState {
-            db,
-            default_user_id: user_id,
-        },
-        cors_layer,
-    );
+    let app = build_router(AppState { db }, cors_layer);
 
     let addr: SocketAddr = ([0, 0, 0, 0], app_config.server.port).into();
     let listener = TcpListener::bind(addr).await?;
     info!(
-        "listening on {addr}, database: {}, user: {}",
-        app_config.database.path, app_config.database.default_username
+        "listening on {addr}, database: {}",
+        app_config.database.path
     );
     axum::serve(listener, app.into_make_service()).await?;
     Ok(())

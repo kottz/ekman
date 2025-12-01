@@ -1,21 +1,59 @@
 //! Application state.
 
 use crate::io::{IoRequest, IoResponse};
+use base32::Alphabet;
+use base32::encode as base32_encode;
 use chrono::{DateTime, Datelike, Duration as ChronoDuration, Local, Utc};
+use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 use ekman_core::models::{
     ActivityDay, ActivityRequest, GraphResponse, PopulatedExercise, PopulatedTemplate,
     UpsertSetRequest,
 };
+use rand::{RngCore, rngs::OsRng};
 use std::collections::HashSet;
 use std::time::{Duration, Instant};
 use tokio::sync::mpsc;
+use urlencoding::encode as url_encode;
 
 const INPUT_TIMEOUT: Duration = Duration::from_secs(1);
 const ACTIVITY_WINDOW_DAYS: i64 = 21;
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum View {
+    Auth,
+    Dashboard,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum AuthMode {
+    Login,
+    Register,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum AuthField {
+    Username,
+    Password,
+    Totp,
+}
+
+pub struct AuthState {
+    pub mode: AuthMode,
+    pub username: String,
+    pub password: String,
+    pub totp_code: String,
+    pub status: String,
+    pub focus: AuthField,
+    pub submitting: bool,
+    pub totp_secret: String,
+    pub otpauth_url: String,
+}
+
 /// Main application state.
 pub struct App {
     pub running: bool,
+    pub view: View,
+    pub auth: AuthState,
     pub exercises: Vec<ExerciseState>,
     pub graphs: Vec<GraphResponse>,
     pub activity: Vec<ActivityDay>,
@@ -30,6 +68,8 @@ impl App {
     pub fn new(io_tx: mpsc::Sender<IoRequest>, io_rx: mpsc::Receiver<IoResponse>) -> Self {
         Self {
             running: true,
+            view: View::Auth,
+            auth: AuthState::new_register(),
             exercises: ExerciseState::defaults(),
             graphs: Vec::new(),
             activity: Vec::new(),
@@ -41,12 +81,109 @@ impl App {
         }
     }
 
+    pub fn is_authenticated(&self) -> bool {
+        self.view == View::Dashboard
+    }
+
+    pub fn handle_auth_key(&mut self, key: KeyEvent) {
+        match key.code {
+            KeyCode::Esc => self.running = false,
+            KeyCode::Tab => self.auth.next_field(),
+            KeyCode::BackTab => self.auth.prev_field(),
+            KeyCode::Enter => self.submit_auth(),
+            KeyCode::Backspace => self.auth.backspace(),
+            KeyCode::Char('l') if key.modifiers.contains(KeyModifiers::CONTROL) => {
+                self.switch_auth_mode(AuthMode::Login)
+            }
+            KeyCode::Char('r') if key.modifiers.contains(KeyModifiers::CONTROL) => {
+                self.switch_auth_mode(AuthMode::Register);
+                self.auth.regenerate_secret();
+            }
+            KeyCode::Char('g') if key.modifiers.contains(KeyModifiers::CONTROL) => {
+                if self.auth.mode == AuthMode::Register {
+                    self.auth.regenerate_secret();
+                }
+            }
+            KeyCode::Char(ch) => self.auth.push_char(ch),
+            _ => {}
+        }
+    }
+
+    fn submit_auth(&mut self) {
+        if self.auth.submitting {
+            return;
+        }
+
+        if self.auth.username.trim().is_empty() {
+            self.auth.status = "Username is required".into();
+            return;
+        }
+        if self.auth.password.trim().is_empty() {
+            self.auth.status = "Password is required".into();
+            return;
+        }
+        if self.auth.totp_code.trim().is_empty() {
+            self.auth.status = "TOTP code is required".into();
+            return;
+        }
+
+        self.auth.submitting = true;
+        self.auth.status = match self.auth.mode {
+            AuthMode::Login => "Signing in...".into(),
+            AuthMode::Register => "Registering...".into(),
+        };
+
+        let _ = match self.auth.mode {
+            AuthMode::Login => self.io_tx.try_send(IoRequest::Login {
+                username: self.auth.username.clone(),
+                password: self.auth.password.clone(),
+                totp: self.auth.totp_code.clone(),
+            }),
+            AuthMode::Register => self.io_tx.try_send(IoRequest::Register {
+                username: self.auth.username.clone(),
+                password: self.auth.password.clone(),
+                totp_secret: self.auth.totp_secret.clone(),
+                totp_code: self.auth.totp_code.clone(),
+            }),
+        };
+    }
+
+    fn switch_auth_mode(&mut self, mode: AuthMode) {
+        if self.auth.mode == mode {
+            return;
+        }
+
+        self.auth.mode = mode;
+        self.auth.totp_code.clear();
+        self.auth.status.clear();
+        self.auth.focus = AuthField::Username;
+        if mode == AuthMode::Register {
+            self.auth.regenerate_secret();
+        }
+    }
+
+    fn on_authenticated(&mut self, username: String) {
+        self.view = View::Dashboard;
+        self.auth.submitting = false;
+        self.auth.status.clear();
+        self.status.backend = format!("Signed in as {username}");
+        self.request_daily_plans();
+        self.request_activity_history();
+        self.refresh_status();
+    }
+
     pub fn request_daily_plans(&mut self) {
+        if self.view != View::Dashboard {
+            return;
+        }
         self.status.backend = "Loading plans...".into();
         let _ = self.io_tx.try_send(IoRequest::LoadDailyPlans);
     }
 
     pub fn request_activity_history(&mut self) {
+        if self.view != View::Dashboard {
+            return;
+        }
         let end_date = Utc::now().date_naive();
         let start_date = end_date - ChronoDuration::days(ACTIVITY_WINDOW_DAYS.saturating_sub(1));
 
@@ -74,6 +211,18 @@ impl App {
 
     fn handle_response(&mut self, response: IoResponse) {
         match response {
+            IoResponse::LoggedIn(result) | IoResponse::Registered(result) => {
+                self.auth.submitting = false;
+                match result {
+                    Ok(info) => {
+                        self.on_authenticated(info.username);
+                    }
+                    Err(e) => {
+                        self.auth.status = e;
+                        self.view = View::Auth;
+                    }
+                }
+            }
             IoResponse::DailyPlans(Ok(plans)) => self.apply_plans(plans),
             IoResponse::DailyPlans(Err(e)) => {
                 self.status.backend = format!("Backend error: {e}");
@@ -120,7 +269,9 @@ impl App {
                 }
             },
         }
-        self.refresh_status();
+        if self.view == View::Dashboard {
+            self.refresh_status();
+        }
     }
 
     fn apply_plans(&mut self, plans: Vec<PopulatedTemplate>) {
@@ -379,6 +530,82 @@ impl App {
         if let Some(id) = ex.exercise_id {
             self.request_graph(id);
         }
+    }
+}
+
+impl AuthState {
+    pub fn new_register() -> Self {
+        let secret = generate_totp_secret();
+        let url = build_otpauth_url("", &secret);
+        Self {
+            mode: AuthMode::Register,
+            username: String::new(),
+            password: String::new(),
+            totp_code: String::new(),
+            status: String::new(),
+            focus: AuthField::Username,
+            submitting: false,
+            totp_secret: secret,
+            otpauth_url: url,
+        }
+    }
+
+    pub fn push_char(&mut self, ch: char) {
+        if ch.is_control() {
+            return;
+        }
+        match self.focus {
+            AuthField::Username => {
+                self.username.push(ch);
+                if self.mode == AuthMode::Register {
+                    self.update_otpauth_url();
+                }
+            }
+            AuthField::Password => self.password.push(ch),
+            AuthField::Totp => self.totp_code.push(ch),
+        }
+    }
+
+    pub fn backspace(&mut self) {
+        match self.focus {
+            AuthField::Username => {
+                self.username.pop();
+                if self.mode == AuthMode::Register {
+                    self.update_otpauth_url();
+                }
+            }
+            AuthField::Password => {
+                self.password.pop();
+            }
+            AuthField::Totp => {
+                self.totp_code.pop();
+            }
+        }
+    }
+
+    pub fn next_field(&mut self) {
+        self.focus = match self.focus {
+            AuthField::Username => AuthField::Password,
+            AuthField::Password => AuthField::Totp,
+            AuthField::Totp => AuthField::Username,
+        };
+    }
+
+    pub fn prev_field(&mut self) {
+        self.focus = match self.focus {
+            AuthField::Username => AuthField::Totp,
+            AuthField::Password => AuthField::Username,
+            AuthField::Totp => AuthField::Password,
+        };
+    }
+
+    pub fn regenerate_secret(&mut self) {
+        self.totp_secret = generate_totp_secret();
+        self.update_otpauth_url();
+    }
+
+    fn update_otpauth_url(&mut self) {
+        self.otpauth_url = build_otpauth_url(&self.username, &self.totp_secret);
     }
 }
 
@@ -701,4 +928,24 @@ impl WeightEntry {
         self.buffer.pop();
         self.value = self.buffer.parse().unwrap_or(0.0);
     }
+}
+
+fn generate_totp_secret() -> String {
+    let mut bytes = [0_u8; 20];
+    OsRng.fill_bytes(&mut bytes);
+    base32_encode(Alphabet::Rfc4648 { padding: false }, &bytes)
+}
+
+fn build_otpauth_url(username: &str, secret: &str) -> String {
+    let label = if username.trim().is_empty() {
+        "ekman".to_string()
+    } else {
+        format!("ekman:{}", username.trim())
+    };
+    let encoded_label = url_encode(&label);
+    format!(
+        "otpauth://totp/{label}?secret={secret}&issuer=ekman&algorithm=SHA1&digits=6&period=30",
+        label = encoded_label,
+        secret = secret
+    )
 }

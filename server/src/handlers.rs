@@ -1,12 +1,22 @@
 use std::collections::{BTreeMap, HashMap, HashSet};
 
+use argon2::{
+    Argon2,
+    password_hash::{
+        PasswordHash, PasswordHasher, PasswordVerifier, SaltString,
+        rand_core::{OsRng, RngCore},
+    },
+};
 use axum::{
     Json,
     extract::{Path, Query, State},
-    http::StatusCode,
+    http::{HeaderMap, HeaderValue, StatusCode, header},
     response::IntoResponse,
 };
+use base32::Alphabet;
+use base32::encode as base32_encode;
 use chrono::{DateTime, Duration as ChronoDuration, NaiveDate, Utc};
+use totp_rs::{Algorithm, Secret, TOTP};
 use turso::{Connection, Value};
 
 use crate::{
@@ -19,18 +29,23 @@ use ekman_core::{
     models::{
         ActivityDay, ActivityRequest, ActivityResponse, CreateExerciseRequest,
         CreateSessionRequest, CreateSessionResponse, Exercise, GraphRequest, GraphResponse,
-        MetricKind, PopulatedExercise, PopulatedTemplate, SetCompact, UpdateExerciseRequest,
+        LoginRequest, LoginResponse, MeResponse, MetricKind, PopulatedExercise, PopulatedTemplate,
+        RegisterRequest, SetCompact, TotpSetupResponse, TotpVerifyRequest, UpdateExerciseRequest,
         UpdateSetRequest, UpsertSetRequest, UpsertSetResponse,
     },
 };
 
 const MAX_GRAPH_POINTS: usize = 50;
 const DEFAULT_ACTIVITY_DAYS: i64 = 21;
+const SESSION_COOKIE: &str = "ekman_session";
+const SESSION_DAYS: i64 = 30;
 
 pub async fn get_daily_plans(
     State(state): State<AppState>,
+    headers: HeaderMap,
 ) -> AppResult<Json<Vec<PopulatedTemplate>>> {
-    let conn = state.db.connect()?;
+    let mut conn = state.db.connect()?;
+    let user = resolve_user_from_session(&mut conn, &headers).await?;
     let mut rows = conn
         .query(
             "SELECT wt.id, wt.name, wt.day_of_week, te.exercise_id, \
@@ -40,7 +55,7 @@ pub async fn get_daily_plans(
              LEFT JOIN exercises e ON e.id = te.exercise_id \
              WHERE wt.user_id = ?1 \
              ORDER BY wt.id, te.display_order",
-            [state.default_user_id],
+            [user.id],
         )
         .await?;
 
@@ -76,8 +91,12 @@ pub async fn get_daily_plans(
         }
     }
 
-    let last_sessions =
-        load_last_sessions(&state, &exercise_ids.into_iter().collect::<Vec<_>>()).await?;
+    let last_sessions = load_last_sessions(
+        &state,
+        user.id,
+        &exercise_ids.into_iter().collect::<Vec<_>>(),
+    )
+    .await?;
 
     let mut templates_vec: Vec<PopulatedTemplate> = templates.into_values().collect();
     for template in templates_vec.iter_mut() {
@@ -95,6 +114,7 @@ pub async fn get_daily_plans(
 pub async fn get_activity_days(
     State(state): State<AppState>,
     Query(request): Query<ActivityRequest>,
+    headers: HeaderMap,
 ) -> AppResult<Json<ActivityResponse>> {
     let end_dt = request.end.unwrap_or_else(now_utc);
     let default_start = end_dt - ChronoDuration::days(DEFAULT_ACTIVITY_DAYS - 1);
@@ -109,8 +129,9 @@ pub async fn get_activity_days(
         ));
     }
 
-    let conn = state.db.connect()?;
-    let counts = fetch_set_counts(&conn, state.default_user_id, start_date, end_date).await?;
+    let mut conn = state.db.connect()?;
+    let user = resolve_user_from_session(&mut conn, &headers).await?;
+    let counts = fetch_set_counts(&conn, user.id, start_date, end_date).await?;
 
     let total_days = end_date.signed_duration_since(start_date).num_days().max(0);
     let mut days = Vec::new();
@@ -126,8 +147,156 @@ pub async fn get_activity_days(
     Ok(Json(ActivityResponse { days }))
 }
 
+pub async fn login(
+    State(state): State<AppState>,
+    Json(payload): Json<LoginRequest>,
+) -> AppResult<impl IntoResponse> {
+    let mut conn = state.db.connect()?;
+    let user = fetch_user(&mut conn, &payload.username).await?;
+
+    verify_password(&payload.password, &user.password_hash, &user.password_salt)?;
+
+    enforce_totp(&user, payload.totp.as_deref())?;
+
+    let expires_at = now_utc() + ChronoDuration::days(SESSION_DAYS);
+    let token = generate_token()?;
+    create_auth_session(&mut conn, user.id, &token, expires_at).await?;
+
+    let cookie = build_session_cookie(&token, expires_at);
+    let mut headers = HeaderMap::new();
+    headers.insert(header::SET_COOKIE, cookie);
+    let response = LoginResponse {
+        user_id: user.id,
+        username: user.username,
+        expires_at,
+    };
+
+    Ok((headers, Json(response)))
+}
+
+pub async fn logout(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+) -> AppResult<impl IntoResponse> {
+    if let Some(token) = extract_session_token(&headers) {
+        let mut conn = state.db.connect()?;
+        delete_auth_session(&mut conn, token).await?;
+    }
+
+    let clearing_cookie = clear_session_cookie();
+    let mut headers = HeaderMap::new();
+    headers.insert(header::SET_COOKIE, clearing_cookie);
+    Ok((headers, StatusCode::NO_CONTENT))
+}
+
+pub async fn register(
+    State(state): State<AppState>,
+    Json(payload): Json<RegisterRequest>,
+) -> AppResult<impl IntoResponse> {
+    let username = payload.username.trim();
+    if username.is_empty() {
+        return Err(AppError::BadRequest("username is required".to_string()));
+    }
+    if payload.password.trim().is_empty() {
+        return Err(AppError::BadRequest("password is required".to_string()));
+    }
+    let totp_secret = payload.totp_secret.trim();
+    if totp_secret.is_empty() {
+        return Err(AppError::BadRequest("totp_secret is required".to_string()));
+    }
+    if payload.totp_code.trim().is_empty() {
+        return Err(AppError::BadRequest("totp_code is required".to_string()));
+    }
+
+    verify_totp(totp_secret, payload.totp_code.trim())?;
+
+    let (hash, salt) = hash_password(&payload.password)?;
+    let mut conn = state.db.connect()?;
+    let insert_result = conn
+        .execute(
+            "INSERT INTO users (username, password_hash, password_salt, totp_secret, totp_enabled) \
+             VALUES (?1, ?2, ?3, ?4, TRUE)",
+            (username, hash.as_str(), salt.as_str(), totp_secret),
+        )
+        .await;
+
+    if let Err(err) = insert_result {
+        if is_unique_violation(&err) {
+            return Err(AppError::BadRequest("username already exists".to_string()));
+        }
+        return Err(err.into());
+    }
+
+    let user_id = conn.last_insert_rowid();
+    let expires_at = now_utc() + ChronoDuration::days(SESSION_DAYS);
+    let token = generate_token()?;
+    create_auth_session(&mut conn, user_id, &token, expires_at).await?;
+
+    let cookie = build_session_cookie(&token, expires_at);
+    let mut headers = HeaderMap::new();
+    headers.insert(header::SET_COOKIE, cookie);
+    let response = LoginResponse {
+        user_id,
+        username: username.to_string(),
+        expires_at,
+    };
+
+    Ok((headers, Json(response)))
+}
+
+pub async fn me(State(state): State<AppState>, headers: HeaderMap) -> AppResult<Json<MeResponse>> {
+    let mut conn = state.db.connect()?;
+    let user = resolve_user_from_session(&mut conn, &headers).await?;
+
+    Ok(Json(MeResponse {
+        user_id: user.id,
+        username: user.username,
+        totp_enabled: user.totp_enabled,
+    }))
+}
+
+pub async fn totp_setup(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+) -> AppResult<Json<TotpSetupResponse>> {
+    let mut conn = state.db.connect()?;
+    let user = resolve_user_from_session(&mut conn, &headers).await?;
+
+    let (secret, otpauth_url) = generate_totp_secret(&user.username)?;
+    conn.execute(
+        "UPDATE users SET totp_secret = ?1, totp_enabled = FALSE WHERE id = ?2",
+        (secret.as_str(), user.id),
+    )
+    .await?;
+
+    Ok(Json(TotpSetupResponse {
+        secret,
+        otpauth_url,
+    }))
+}
+
+pub async fn totp_enable(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Json(payload): Json<TotpVerifyRequest>,
+) -> AppResult<impl IntoResponse> {
+    let mut conn = state.db.connect()?;
+    let user = resolve_user_from_session(&mut conn, &headers).await?;
+
+    verify_totp(&user.totp_secret, &payload.code)?;
+
+    conn.execute(
+        "UPDATE users SET totp_enabled = TRUE WHERE id = ?1",
+        [user.id],
+    )
+    .await?;
+
+    Ok(StatusCode::NO_CONTENT)
+}
+
 pub async fn upsert_set(
     State(state): State<AppState>,
+    headers: HeaderMap,
     Json(payload): Json<UpsertSetRequest>,
 ) -> AppResult<Json<UpsertSetResponse>> {
     if payload.set_number < 1 {
@@ -146,8 +315,8 @@ pub async fn upsert_set(
 
     let completed_at = payload.completed_at.unwrap_or_else(now_utc);
     let mut conn = state.db.connect()?;
-    let session_id =
-        ensure_session_for_date(&mut conn, state.default_user_id, completed_at).await?;
+    let user = resolve_user_from_session(&mut conn, &headers).await?;
+    let session_id = ensure_session_for_date(&mut conn, user.id, completed_at).await?;
 
     conn.execute(
         "INSERT INTO workout_sets (session_id, exercise_id, set_number, weight_kg, reps, completed_at) \
@@ -180,6 +349,7 @@ pub async fn get_exercise_graph(
     State(state): State<AppState>,
     Path(exercise_id): Path<i64>,
     Query(request): Query<GraphRequest>,
+    headers: HeaderMap,
 ) -> AppResult<Json<GraphResponse>> {
     let metric = request.metric.unwrap_or(MetricKind::MaxWeight);
     if let (Some(start), Some(end)) = (request.start, request.end)
@@ -190,16 +360,10 @@ pub async fn get_exercise_graph(
         ));
     }
 
-    let conn = state.db.connect()?;
-    let exercise_name = fetch_exercise_name(&conn, exercise_id, state.default_user_id).await?;
-    let sets = fetch_exercise_sets(
-        &conn,
-        exercise_id,
-        state.default_user_id,
-        request.start,
-        request.end,
-    )
-    .await?;
+    let mut conn = state.db.connect()?;
+    let user = resolve_user_from_session(&mut conn, &headers).await?;
+    let exercise_name = fetch_exercise_name(&conn, exercise_id, user.id).await?;
+    let sets = fetch_exercise_sets(&conn, exercise_id, user.id, request.start, request.end).await?;
 
     let points = build_graph_points(sets, metric, MAX_GRAPH_POINTS);
 
@@ -212,6 +376,7 @@ pub async fn get_exercise_graph(
 
 pub async fn create_session(
     State(state): State<AppState>,
+    headers: HeaderMap,
     Json(payload): Json<CreateSessionRequest>,
 ) -> AppResult<Json<CreateSessionResponse>> {
     if payload.sets.is_empty() {
@@ -221,11 +386,12 @@ pub async fn create_session(
     }
 
     let mut conn = state.db.connect()?;
+    let user = resolve_user_from_session(&mut conn, &headers).await?;
     let tx = conn.transaction().await?;
 
     tx.execute(
         "INSERT INTO sessions (user_id, notes) VALUES (?1, ?2)",
-        (state.default_user_id, payload.notes.clone()),
+        (user.id, payload.notes.clone()),
     )
     .await?;
     let session_id = tx.last_insert_rowid();
@@ -260,6 +426,7 @@ pub async fn create_session(
 
 pub async fn update_set(
     State(state): State<AppState>,
+    headers: HeaderMap,
     Path(set_id): Path<i64>,
     Json(payload): Json<UpdateSetRequest>,
 ) -> AppResult<impl IntoResponse> {
@@ -298,7 +465,11 @@ pub async fn update_set(
     sql.push_str(" WHERE id = ?");
     params.push(set_id.into());
 
-    let conn = state.db.connect()?;
+    let mut conn = state.db.connect()?;
+    let user = resolve_user_from_session(&mut conn, &headers).await?;
+    sql.push_str(" AND session_id IN (SELECT id FROM sessions WHERE user_id = ?)");
+    params.push(user.id.into());
+
     let updated = conn.execute(&sql, params).await?;
     if updated == 0 {
         return Err(AppError::NotFound("set not found".to_string()));
@@ -310,10 +481,16 @@ pub async fn update_set(
 pub async fn delete_set(
     State(state): State<AppState>,
     Path(set_id): Path<i64>,
+    headers: HeaderMap,
 ) -> AppResult<impl IntoResponse> {
-    let conn = state.db.connect()?;
+    let mut conn = state.db.connect()?;
+    let user = resolve_user_from_session(&mut conn, &headers).await?;
     let deleted = conn
-        .execute("DELETE FROM workout_sets WHERE id = ?", [set_id])
+        .execute(
+            "DELETE FROM workout_sets WHERE id = ?1 AND session_id IN \
+             (SELECT id FROM sessions WHERE user_id = ?2)",
+            (set_id, user.id),
+        )
         .await?;
 
     if deleted == 0 {
@@ -323,14 +500,18 @@ pub async fn delete_set(
     Ok(StatusCode::NO_CONTENT)
 }
 
-pub async fn list_exercises(State(state): State<AppState>) -> AppResult<Json<Vec<Exercise>>> {
-    let conn = state.db.connect()?;
+pub async fn list_exercises(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+) -> AppResult<Json<Vec<Exercise>>> {
+    let mut conn = state.db.connect()?;
+    let user = resolve_user_from_session(&mut conn, &headers).await?;
     let mut rows = conn
         .query(
             "SELECT id, name, description, archived FROM exercises \
              WHERE user_id = ?1 AND archived = FALSE \
              ORDER BY name",
-            [state.default_user_id],
+            [user.id],
         )
         .await?;
 
@@ -353,6 +534,7 @@ pub async fn list_exercises(State(state): State<AppState>) -> AppResult<Json<Vec
 
 pub async fn create_exercise(
     State(state): State<AppState>,
+    headers: HeaderMap,
     Json(payload): Json<CreateExerciseRequest>,
 ) -> AppResult<Json<Exercise>> {
     if payload.name.trim().is_empty() {
@@ -361,10 +543,11 @@ pub async fn create_exercise(
 
     let name = payload.name.trim().to_string();
     let description = payload.description;
-    let conn = state.db.connect()?;
+    let mut conn = state.db.connect()?;
+    let user = resolve_user_from_session(&mut conn, &headers).await?;
     conn.execute(
         "INSERT INTO exercises (user_id, name, description) VALUES (?1, ?2, ?3)",
-        (state.default_user_id, name.as_str(), description.as_deref()),
+        (user.id, name.as_str(), description.as_deref()),
     )
     .await?;
 
@@ -379,6 +562,7 @@ pub async fn create_exercise(
 
 pub async fn update_exercise(
     State(state): State<AppState>,
+    headers: HeaderMap,
     Path(exercise_id): Path<i64>,
     Json(payload): Json<UpdateExerciseRequest>,
 ) -> AppResult<impl IntoResponse> {
@@ -409,9 +593,10 @@ pub async fn update_exercise(
     sql.push_str(&parts.join(", "));
     sql.push_str(" WHERE id = ? AND user_id = ?");
     params.push(exercise_id.into());
-    params.push(state.default_user_id.into());
+    let mut conn = state.db.connect()?;
+    let user = resolve_user_from_session(&mut conn, &headers).await?;
+    params.push(user.id.into());
 
-    let conn = state.db.connect()?;
     let updated = conn.execute(&sql, params).await?;
     if updated == 0 {
         return Err(AppError::NotFound("exercise not found".to_string()));
@@ -423,12 +608,14 @@ pub async fn update_exercise(
 pub async fn archive_exercise(
     State(state): State<AppState>,
     Path(exercise_id): Path<i64>,
+    headers: HeaderMap,
 ) -> AppResult<impl IntoResponse> {
-    let conn = state.db.connect()?;
+    let mut conn = state.db.connect()?;
+    let user = resolve_user_from_session(&mut conn, &headers).await?;
     let updated = conn
         .execute(
             "UPDATE exercises SET archived = TRUE WHERE id = ?1 AND user_id = ?2",
-            (exercise_id, state.default_user_id),
+            (exercise_id, user.id),
         )
         .await?;
 
@@ -441,6 +628,7 @@ pub async fn archive_exercise(
 
 async fn load_last_sessions(
     state: &AppState,
+    user_id: i64,
     exercise_ids: &[i64],
 ) -> AppResult<HashMap<i64, (Option<DateTime<Utc>>, Vec<SetCompact>)>> {
     let conn = state.db.connect()?;
@@ -459,7 +647,7 @@ async fn load_last_sessions(
             )
             .await?;
 
-        match stmt.query_row((*exercise_id, state.default_user_id)).await {
+        match stmt.query_row((*exercise_id, user_id)).await {
             Ok(row) => {
                 let session_id: i64 = row.get(0)?;
                 let started_at_raw: String = row.get(1)?;
@@ -599,6 +787,238 @@ async fn fetch_set_id(
         .await?;
     let set_id: i64 = row.get(0)?;
     Ok(set_id)
+}
+
+#[derive(Debug, Clone)]
+struct AuthUser {
+    id: i64,
+    username: String,
+    password_hash: String,
+    password_salt: String,
+    totp_secret: String,
+    totp_enabled: bool,
+}
+
+fn generate_token() -> AppResult<String> {
+    let mut bytes = [0_u8; 32];
+    let mut rng = OsRng;
+    rng.fill_bytes(&mut bytes);
+    let mut token = String::with_capacity(bytes.len() * 2);
+    for b in bytes {
+        use std::fmt::Write;
+        let _ = write!(token, "{b:02x}");
+    }
+    Ok(token)
+}
+
+fn verify_password(input: &str, stored_hash: &str, _salt: &str) -> AppResult<()> {
+    let parsed_hash = PasswordHash::new(stored_hash)
+        .map_err(|err| AppError::Internal(format!("invalid password hash: {err}")))?;
+    Argon2::default()
+        .verify_password(input.as_bytes(), &parsed_hash)
+        .map_err(|_| AppError::Unauthorized)
+}
+
+fn hash_password(input: &str) -> AppResult<(String, String)> {
+    let salt = SaltString::generate(&mut OsRng);
+    let hash = Argon2::default()
+        .hash_password(input.as_bytes(), &salt)
+        .map_err(|err| AppError::Internal(format!("failed to hash password: {err}")))?
+        .to_string();
+    Ok((hash, salt.to_string()))
+}
+
+fn build_session_cookie(token: &str, expires_at: DateTime<Utc>) -> HeaderValue {
+    let max_age = expires_at
+        .signed_duration_since(now_utc())
+        .num_seconds()
+        .max(0);
+    let value =
+        format!("{SESSION_COOKIE}={token}; HttpOnly; SameSite=Lax; Path=/; Max-Age={max_age}");
+    HeaderValue::from_str(&value).unwrap_or_else(|_| HeaderValue::from_static(""))
+}
+
+fn clear_session_cookie() -> HeaderValue {
+    let value = format!("{SESSION_COOKIE}=; Max-Age=0; Path=/; HttpOnly; SameSite=Lax");
+    HeaderValue::from_str(&value).unwrap_or_else(|_| HeaderValue::from_static(""))
+}
+
+fn extract_session_token(headers: &HeaderMap) -> Option<String> {
+    let raw = headers.get(header::COOKIE)?.to_str().ok()?;
+    for part in raw.split(';') {
+        let mut iter = part.trim().splitn(2, '=');
+        if let (Some(name), Some(value)) = (iter.next(), iter.next())
+            && name == SESSION_COOKIE
+        {
+            return Some(value.to_string());
+        }
+    }
+    None
+}
+
+async fn create_auth_session(
+    conn: &mut Connection,
+    user_id: i64,
+    token: &str,
+    expires_at: DateTime<Utc>,
+) -> AppResult<()> {
+    let now = serialize_timestamp(now_utc());
+    conn.execute(
+        "INSERT INTO auth_sessions (user_id, token, expires_at, last_used_at) VALUES (?1, ?2, ?3, ?4)",
+        (user_id, token, serialize_timestamp(expires_at), now),
+    )
+    .await?;
+    Ok(())
+}
+
+async fn delete_auth_session(conn: &mut Connection, token: String) -> AppResult<()> {
+    conn.execute("DELETE FROM auth_sessions WHERE token = ?", [token])
+        .await?;
+    Ok(())
+}
+
+async fn fetch_auth_session_user(
+    conn: &mut Connection,
+    token: &str,
+) -> AppResult<Option<(i64, DateTime<Utc>)>> {
+    let mut stmt = conn
+        .prepare("SELECT user_id, expires_at FROM auth_sessions WHERE token = ?1")
+        .await?;
+    match stmt.query_row([token]).await {
+        Ok(row) => {
+            let user_id: i64 = row.get(0)?;
+            let expires_raw: String = row.get(1)?;
+            let expires_at = parse_timestamp(&expires_raw)?;
+            Ok(Some((user_id, expires_at)))
+        }
+        Err(turso::Error::QueryReturnedNoRows) => Ok(None),
+        Err(err) => Err(err.into()),
+    }
+}
+
+async fn fetch_user(conn: &mut Connection, username: &str) -> AppResult<AuthUser> {
+    let mut stmt = conn
+        .prepare(
+            "SELECT id, username, password_hash, password_salt, totp_secret, totp_enabled \
+             FROM users WHERE username = ?1",
+        )
+        .await?;
+
+    let row = stmt.query_row([username]).await.map_err(|err| match err {
+        turso::Error::QueryReturnedNoRows => AppError::Unauthorized,
+        other => other.into(),
+    })?;
+
+    Ok(AuthUser {
+        id: row.get(0)?,
+        username: row.get(1)?,
+        password_hash: row.get(2)?,
+        password_salt: row.get(3)?,
+        totp_secret: row.get(4)?,
+        totp_enabled: row.get::<bool>(5)?,
+    })
+}
+
+async fn fetch_user_by_id(conn: &mut Connection, user_id: i64) -> AppResult<AuthUser> {
+    let mut stmt = conn
+        .prepare(
+            "SELECT id, username, password_hash, password_salt, totp_secret, totp_enabled \
+             FROM users WHERE id = ?1",
+        )
+        .await?;
+    let row = stmt.query_row([user_id]).await?;
+    Ok(AuthUser {
+        id: row.get(0)?,
+        username: row.get(1)?,
+        password_hash: row.get(2)?,
+        password_salt: row.get(3)?,
+        totp_secret: row.get(4)?,
+        totp_enabled: row.get::<bool>(5)?,
+    })
+}
+
+async fn resolve_user_from_session(
+    conn: &mut Connection,
+    headers: &HeaderMap,
+) -> AppResult<AuthUser> {
+    let token = extract_session_token(headers).ok_or(AppError::Unauthorized)?;
+    let Some((user_id, expires_at)) = fetch_auth_session_user(conn, &token).await? else {
+        return Err(AppError::Unauthorized);
+    };
+
+    if expires_at < now_utc() {
+        delete_auth_session(conn, token).await?;
+        return Err(AppError::Unauthorized);
+    }
+
+    fetch_user_by_id(conn, user_id)
+        .await
+        .map_err(|err| match err {
+            AppError::NotFound(_) => AppError::Unauthorized,
+            other => other,
+        })
+}
+
+fn verify_totp(secret_b32: &str, code: &str) -> AppResult<()> {
+    let bytes = Secret::Encoded(secret_b32.to_string())
+        .to_bytes()
+        .map_err(|err| AppError::Internal(format!("invalid TOTP secret: {err}")))?;
+    let totp = TOTP::new(
+        Algorithm::SHA1,
+        6,
+        1,
+        30,
+        bytes,
+        Some("ekman".to_string()),
+        "ekman".to_string(),
+    )
+    .map_err(|err| AppError::Internal(format!("failed to build TOTP: {err}")))?;
+    let valid = totp
+        .check_current(code)
+        .map_err(|err| AppError::Internal(format!("failed to verify TOTP: {err}")))?;
+    if valid {
+        Ok(())
+    } else {
+        Err(AppError::Unauthorized)
+    }
+}
+
+fn enforce_totp(user: &AuthUser, code: Option<&str>) -> AppResult<()> {
+    if !user.totp_enabled {
+        return Err(AppError::Unauthorized);
+    }
+
+    let Some(code) = code else {
+        return Err(AppError::Unauthorized);
+    };
+
+    verify_totp(&user.totp_secret, code)
+}
+
+fn is_unique_violation(err: &turso::Error) -> bool {
+    err.to_string()
+        .contains("UNIQUE constraint failed: users.username")
+}
+
+fn generate_totp_secret(username: &str) -> AppResult<(String, String)> {
+    let mut bytes = [0_u8; 20];
+    let mut rng = OsRng;
+    rng.fill_bytes(&mut bytes);
+    let secret_b32 = base32_encode(Alphabet::Rfc4648 { padding: false }, &bytes);
+
+    let totp = TOTP::new(
+        Algorithm::SHA1,
+        6,
+        1,
+        30,
+        bytes.to_vec(),
+        Some("ekman".to_string()),
+        username.to_string(),
+    )
+    .map_err(|err| AppError::Internal(format!("failed to build TOTP: {err}")))?;
+    let otpauth_url = totp.get_url();
+
+    Ok((secret_b32, otpauth_url))
 }
 
 async fn fetch_exercise_name(

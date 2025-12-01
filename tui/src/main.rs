@@ -19,13 +19,11 @@ const TICK_RATE: Duration = Duration::from_millis(16);
 async fn main() -> color_eyre::Result<()> {
     color_eyre::install()?;
 
-    let bindings = KeyBindings::load(&config_path());
-    let (io_tx, io_rx) = io::spawn();
-    let mut app = App::new(io_tx, io_rx);
+    let client = io::build_client()?;
 
-    app.request_daily_plans();
-    app.request_activity_history();
-    app.refresh_status();
+    let bindings = KeyBindings::load(&config_path());
+    let (io_tx, io_rx) = io::spawn(client);
+    let mut app = App::new(io_tx, io_rx);
 
     let mut terminal = ratatui::init();
     let result = run(&mut app, &mut terminal, &bindings);
@@ -50,9 +48,14 @@ fn run(
         if event::poll(timeout)?
             && let Event::Key(key) = event::read()?
             && key.kind == KeyEventKind::Press
-            && let Some(cmd) = bindings.get(key)
         {
-            execute(app, cmd);
+            if app.is_authenticated() {
+                if let Some(cmd) = bindings.get(key) {
+                    execute(app, cmd);
+                }
+            } else {
+                app.handle_auth_key(key);
+            }
         }
 
         if last_tick.elapsed() >= TICK_RATE {
