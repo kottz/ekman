@@ -3,13 +3,17 @@
 use color_eyre::eyre::WrapErr;
 use ekman_core::models::{
     ActivityRequest, ActivityResponse, GraphRequest, GraphResponse, LoginRequest, LoginResponse,
-    PopulatedTemplate, RegisterRequest, UpsertSetRequest, UpsertSetResponse,
+    MeResponse, PopulatedTemplate, RegisterRequest, UpsertSetRequest, UpsertSetResponse,
 };
+use reqwest::Url;
+use reqwest::cookie::{CookieStore, Jar};
+use std::{fs, path::Path, sync::Arc};
 use tokio::sync::mpsc;
 
 const BACKEND_BASE_URL: &str = "http://localhost:3000";
 const REGISTER_PATH: &str = "/api/auth/register";
 const LOGIN_PATH: &str = "/api/auth/login";
+const ME_PATH: &str = "/api/auth/me";
 const DAILY_PLANS_PATH: &str = "/api/plans/daily";
 const EXERCISES_PATH: &str = "/api/exercises";
 const ACTIVITY_PATH: &str = "/api/activity/days";
@@ -30,6 +34,7 @@ pub enum IoRequest {
         totp_secret: String,
         totp_code: String,
     },
+    CheckSession,
     LoadDailyPlans,
     LoadGraph(i64),
     LoadActivityRange(ActivityRequest),
@@ -45,6 +50,7 @@ pub enum IoRequest {
 pub enum IoResponse {
     LoggedIn(Result<LoginResponse, String>),
     Registered(Result<LoginResponse, String>),
+    SessionChecked(Result<MeResponse, String>),
     DailyPlans(Result<Vec<PopulatedTemplate>, String>),
     Graph(i64, Result<GraphResponse, String>),
     Activity(Result<ActivityResponse, String>),
@@ -55,11 +61,50 @@ pub enum IoResponse {
     },
 }
 
-pub fn build_client() -> color_eyre::Result<reqwest::Client> {
-    reqwest::Client::builder()
-        .cookie_store(true)
+pub fn build_client_with_store(path: &Path) -> color_eyre::Result<(reqwest::Client, Arc<Jar>)> {
+    let jar = Arc::new(Jar::default());
+    let url = backend_url()?;
+    load_session_cookie(path, &jar, &url)?;
+    let client = reqwest::Client::builder()
+        .cookie_provider(Arc::clone(&jar))
         .build()
-        .wrap_err("failed to build HTTP client")
+        .wrap_err("failed to build HTTP client")?;
+    Ok((client, jar))
+}
+
+fn backend_url() -> color_eyre::Result<Url> {
+    Url::parse(BACKEND_BASE_URL).wrap_err("invalid backend base url")
+}
+
+fn load_session_cookie(path: &Path, jar: &Arc<Jar>, url: &Url) -> color_eyre::Result<()> {
+    if !path.exists() {
+        return Ok(());
+    }
+    let data = fs::read_to_string(path).wrap_err("failed to read session cookie")?;
+    if data.trim().is_empty() {
+        return Ok(());
+    }
+    jar.add_cookie_str(data.trim(), url);
+    Ok(())
+}
+
+pub fn save_session_cookie(path: &Path, jar: &Arc<Jar>) -> color_eyre::Result<()> {
+    let url = backend_url()?;
+    let Some(header) = jar.cookies(&url) else {
+        return Ok(());
+    };
+    let value = header
+        .to_str()
+        .map_err(|_| color_eyre::eyre::eyre!("invalid cookie header"))?
+        .to_string();
+    if value.is_empty() {
+        return Ok(());
+    }
+    let persisted = format!("{value}; Path=/");
+    if let Some(parent) = path.parent() {
+        fs::create_dir_all(parent).wrap_err("failed to create cookie dir")?;
+    }
+    fs::write(path, persisted).wrap_err("failed to write session cookie")
 }
 
 pub async fn login(
@@ -82,6 +127,19 @@ pub async fn login(
         .wrap_err("login failed")?;
 
     response.json().await.wrap_err("parse error")
+}
+
+pub async fn check_session(client: &reqwest::Client) -> color_eyre::Result<MeResponse> {
+    client
+        .get(format!("{BACKEND_BASE_URL}{ME_PATH}"))
+        .send()
+        .await
+        .wrap_err("request failed")?
+        .error_for_status()
+        .wrap_err("session check failed")?
+        .json()
+        .await
+        .wrap_err("parse error")
 }
 
 pub async fn register(
@@ -145,6 +203,10 @@ async fn run(
                     .await
                     .map_err(|e| e.to_string());
                 IoResponse::Registered(result)
+            }
+            IoRequest::CheckSession => {
+                let result = check_session(&client).await.map_err(|e| e.to_string());
+                IoResponse::SessionChecked(result)
             }
             IoRequest::LoadDailyPlans => {
                 IoResponse::DailyPlans(fetch_daily_plans(&client).await.map_err(|e| e.to_string()))

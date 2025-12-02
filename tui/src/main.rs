@@ -19,11 +19,13 @@ const TICK_RATE: Duration = Duration::from_millis(16);
 async fn main() -> color_eyre::Result<()> {
     color_eyre::install()?;
 
-    let client = io::build_client()?;
+    let cookie_path = cookie_path();
+    let (client, jar) = io::build_client_with_store(&cookie_path)?;
 
     let bindings = KeyBindings::load(&config_path());
     let (io_tx, io_rx) = io::spawn(client);
-    let mut app = App::new(io_tx, io_rx);
+    let mut app = App::new(io_tx, io_rx, jar, cookie_path);
+    app.try_resume_session();
 
     let mut terminal = ratatui::init();
     let result = run(&mut app, &mut terminal, &bindings);
@@ -133,4 +135,10 @@ fn config_dir() -> Option<PathBuf> {
         .map(PathBuf::from)
         .or_else(|| std::env::var_os("HOME").map(|h| PathBuf::from(h).join(".config")))
         .map(|p| p.join("ekman"))
+}
+
+fn cookie_path() -> PathBuf {
+    config_dir()
+        .map(|d| d.join("session.cookie"))
+        .unwrap_or_else(|| PathBuf::from("session.cookie"))
 }

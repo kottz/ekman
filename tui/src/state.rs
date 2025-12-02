@@ -1,6 +1,6 @@
 //! Application state.
 
-use crate::io::{IoRequest, IoResponse};
+use crate::io::{self, IoRequest, IoResponse};
 use base32::Alphabet;
 use base32::encode as base32_encode;
 use chrono::{DateTime, Datelike, Duration as ChronoDuration, Local, Utc};
@@ -10,7 +10,10 @@ use ekman_core::models::{
     UpsertSetRequest,
 };
 use rand::{RngCore, rngs::OsRng};
+use reqwest::cookie::Jar;
 use std::collections::HashSet;
+use std::path::PathBuf;
+use std::sync::Arc;
 use std::time::{Duration, Instant};
 use tokio::sync::mpsc;
 use urlencoding::encode as url_encode;
@@ -54,6 +57,8 @@ pub struct App {
     pub running: bool,
     pub view: View,
     pub auth: AuthState,
+    cookie_store: Arc<Jar>,
+    cookie_path: PathBuf,
     pub exercises: Vec<ExerciseState>,
     pub graphs: Vec<GraphResponse>,
     pub activity: Vec<ActivityDay>,
@@ -65,11 +70,18 @@ pub struct App {
 }
 
 impl App {
-    pub fn new(io_tx: mpsc::Sender<IoRequest>, io_rx: mpsc::Receiver<IoResponse>) -> Self {
+    pub fn new(
+        io_tx: mpsc::Sender<IoRequest>,
+        io_rx: mpsc::Receiver<IoResponse>,
+        cookie_store: Arc<Jar>,
+        cookie_path: PathBuf,
+    ) -> Self {
         Self {
             running: true,
             view: View::Auth,
             auth: AuthState::new_register(),
+            cookie_store,
+            cookie_path,
             exercises: ExerciseState::defaults(),
             graphs: Vec::new(),
             activity: Vec::new(),
@@ -83,6 +95,10 @@ impl App {
 
     pub fn is_authenticated(&self) -> bool {
         self.view == View::Dashboard
+    }
+
+    pub fn try_resume_session(&mut self) {
+        let _ = self.io_tx.try_send(IoRequest::CheckSession);
     }
 
     pub fn handle_auth_key(&mut self, key: KeyEvent) {
@@ -172,6 +188,12 @@ impl App {
         self.refresh_status();
     }
 
+    fn persist_cookies(&self) {
+        if let Err(err) = io::save_session_cookie(&self.cookie_path, &self.cookie_store) {
+            eprintln!("warning: failed to persist session cookies: {err}");
+        }
+    }
+
     pub fn request_daily_plans(&mut self) {
         if self.view != View::Dashboard {
             return;
@@ -216,6 +238,7 @@ impl App {
                 match result {
                     Ok(info) => {
                         self.on_authenticated(info.username);
+                        self.persist_cookies();
                     }
                     Err(e) => {
                         self.auth.status = e;
@@ -223,6 +246,16 @@ impl App {
                     }
                 }
             }
+            IoResponse::SessionChecked(result) => match result {
+                Ok(me) => {
+                    self.on_authenticated(me.username);
+                    self.persist_cookies();
+                }
+                Err(e) => {
+                    self.auth.status = e;
+                    self.view = View::Auth;
+                }
+            },
             IoResponse::DailyPlans(Ok(plans)) => self.apply_plans(plans),
             IoResponse::DailyPlans(Err(e)) => {
                 self.status.backend = format!("Backend error: {e}");
