@@ -7,7 +7,7 @@ use chrono::{DateTime, Datelike, Duration as ChronoDuration, Local, Utc};
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 use ekman_core::models::{
     ActivityDay, ActivityRequest, GraphResponse, PopulatedExercise, PopulatedTemplate,
-    UpsertSetRequest,
+    SetForDayRequest,
 };
 use rand::{RngCore, rngs::OsRng};
 use reqwest::cookie::Jar;
@@ -529,9 +529,8 @@ impl App {
         };
 
         let completed_at = set.completed_at_utc().unwrap_or_else(Utc::now);
-        let request = UpsertSetRequest {
-            exercise_id,
-            set_number: set_index as i32 + 1,
+        let day = completed_at.date_naive();
+        let request = SetForDayRequest {
             weight: set.weight.value as f64,
             reps: reps as i32,
             completed_at: Some(completed_at),
@@ -540,6 +539,8 @@ impl App {
         let _ = self.io_tx.try_send(IoRequest::SaveSet {
             exercise_id,
             set_index,
+            set_number: set_index as i32 + 1,
+            day,
             request,
         });
     }

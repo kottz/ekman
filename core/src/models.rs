@@ -131,19 +131,21 @@ pub struct ActivityResponse {
 }
 
 #[derive(Debug, Deserialize, Serialize, Clone)]
-pub struct UpsertSetRequest {
-    pub exercise_id: i64,
-    pub set_number: i32,
+pub struct SetForDayRequest {
     pub weight: f64,
     pub reps: i32,
     pub completed_at: Option<DateTime<Utc>>,
 }
 
 #[derive(Debug, Serialize, Deserialize, Clone)]
-pub struct UpsertSetResponse {
+pub struct SetForDayResponse {
     pub set_id: i64,
     pub session_id: i64,
 }
+
+// Temporary aliases for older callers; prefer the new SetForDay* names.
+pub type UpsertSetRequest = SetForDayRequest;
+pub type UpsertSetResponse = SetForDayResponse;
 
 // Auth & sessions -----------------------------------------------------------
 

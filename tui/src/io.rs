@@ -1,9 +1,10 @@
 //! Background I/O task for network operations.
 
+use chrono::NaiveDate;
 use color_eyre::eyre::WrapErr;
 use ekman_core::models::{
     ActivityRequest, ActivityResponse, GraphRequest, GraphResponse, LoginRequest, LoginResponse,
-    MeResponse, PopulatedTemplate, RegisterRequest, UpsertSetRequest, UpsertSetResponse,
+    MeResponse, PopulatedTemplate, RegisterRequest, SetForDayRequest, SetForDayResponse,
 };
 use reqwest::Url;
 use reqwest::cookie::{CookieStore, Jar};
@@ -17,7 +18,7 @@ const ME_PATH: &str = "/api/auth/me";
 const DAILY_PLANS_PATH: &str = "/api/plans/daily";
 const EXERCISES_PATH: &str = "/api/exercises";
 const ACTIVITY_PATH: &str = "/api/activity/days";
-const SETS_PATH: &str = "/api/sets";
+const DAYS_PATH: &str = "/api/days";
 
 /// Events sent to the background task.
 #[derive(Debug)]
@@ -41,7 +42,9 @@ pub enum IoRequest {
     SaveSet {
         exercise_id: i64,
         set_index: usize,
-        request: UpsertSetRequest,
+        set_number: i32,
+        day: NaiveDate,
+        request: SetForDayRequest,
     },
 }
 
@@ -57,7 +60,7 @@ pub enum IoResponse {
     SetSaved {
         exercise_id: i64,
         set_index: usize,
-        result: Result<UpsertSetResponse, String>,
+        result: Result<SetForDayResponse, String>,
     },
 }
 
@@ -224,9 +227,13 @@ async fn run(
             IoRequest::SaveSet {
                 exercise_id,
                 set_index,
+                set_number,
+                day,
                 request,
             } => {
-                let result = save_set(&client, request).await.map_err(|e| e.to_string());
+                let result = save_set(&client, day, exercise_id, set_number, request)
+                    .await
+                    .map_err(|e| e.to_string());
                 IoResponse::SetSaved {
                     exercise_id,
                     set_index,
@@ -291,10 +298,17 @@ async fn fetch_activity(
 
 async fn save_set(
     client: &reqwest::Client,
-    request: UpsertSetRequest,
-) -> color_eyre::Result<UpsertSetResponse> {
+    day: NaiveDate,
+    exercise_id: i64,
+    set_number: i32,
+    request: SetForDayRequest,
+) -> color_eyre::Result<SetForDayResponse> {
+    let url = format!(
+        "{BACKEND_BASE_URL}{DAYS_PATH}/{day}/exercises/{exercise_id}/sets/{set_number}",
+        day = day.format("%Y-%m-%d"),
+    );
     client
-        .put(format!("{BACKEND_BASE_URL}{SETS_PATH}"))
+        .put(url)
         .json(&request)
         .send()
         .await

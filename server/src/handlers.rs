@@ -16,6 +16,7 @@ use axum::{
 use base32::Alphabet;
 use base32::encode as base32_encode;
 use chrono::{DateTime, Duration as ChronoDuration, NaiveDate, Utc};
+use serde::Deserialize;
 use totp_rs::{Algorithm, Secret, TOTP};
 use turso::{Connection, Value};
 
@@ -30,8 +31,8 @@ use ekman_core::{
         ActivityDay, ActivityRequest, ActivityResponse, CreateExerciseRequest,
         CreateSessionRequest, CreateSessionResponse, Exercise, GraphRequest, GraphResponse,
         LoginRequest, LoginResponse, MeResponse, MetricKind, PopulatedExercise, PopulatedTemplate,
-        RegisterRequest, SetCompact, TotpSetupResponse, TotpVerifyRequest, UpdateExerciseRequest,
-        UpdateSetRequest, UpsertSetRequest, UpsertSetResponse,
+        RegisterRequest, SetCompact, SetForDayRequest, SetForDayResponse, TotpSetupResponse,
+        TotpVerifyRequest, UpdateExerciseRequest, UpdateSetRequest,
     },
 };
 
@@ -294,12 +295,20 @@ pub async fn totp_enable(
     Ok(StatusCode::NO_CONTENT)
 }
 
-pub async fn upsert_set(
+#[derive(Deserialize)]
+pub struct SetPathParams {
+    date: String,
+    exercise_id: i64,
+    set_number: i32,
+}
+
+pub async fn upsert_set_for_day(
     State(state): State<AppState>,
     headers: HeaderMap,
-    Json(payload): Json<UpsertSetRequest>,
-) -> AppResult<Json<UpsertSetResponse>> {
-    if payload.set_number < 1 {
+    Path(params): Path<SetPathParams>,
+    Json(payload): Json<SetForDayRequest>,
+) -> AppResult<Json<SetForDayResponse>> {
+    if params.set_number < 1 {
         return Err(AppError::BadRequest(
             "set_number must be at least 1".to_string(),
         ));
@@ -313,7 +322,25 @@ pub async fn upsert_set(
         ));
     }
 
-    let completed_at = payload.completed_at.unwrap_or_else(now_utc);
+    let day = NaiveDate::parse_from_str(&params.date, "%Y-%m-%d").map_err(|_| {
+        AppError::BadRequest("invalid date format, expected YYYY-MM-DD".to_string())
+    })?;
+
+    if let Some(completed_at) = payload.completed_at
+        && completed_at.date_naive() != day
+    {
+        return Err(AppError::BadRequest(
+            "completed_at must match the day in the URL".to_string(),
+        ));
+    }
+
+    let completed_at = payload.completed_at.unwrap_or_else(|| {
+        let naive = day
+            .and_hms_opt(12, 0, 0)
+            .expect("valid midday for requested date");
+        DateTime::<Utc>::from_naive_utc_and_offset(naive, Utc)
+    });
+
     let mut conn = state.db.connect()?;
     let user = resolve_user_from_session(&mut conn, &headers).await?;
     let session_id = ensure_session_for_date(&mut conn, user.id, completed_at).await?;
@@ -322,11 +349,11 @@ pub async fn upsert_set(
         "INSERT INTO workout_sets (session_id, exercise_id, set_number, weight_kg, reps, completed_at) \
          VALUES (?1, ?2, ?3, ?4, ?5, ?6) \
          ON CONFLICT(session_id, exercise_id, set_number) DO UPDATE SET \
-            weight_kg = excluded.weight_kg, reps = excluded.reps",
+            weight_kg = excluded.weight_kg, reps = excluded.reps, completed_at = excluded.completed_at",
         (
             session_id,
-            payload.exercise_id,
-            payload.set_number,
+            params.exercise_id,
+            params.set_number,
             payload.weight,
             payload.reps,
             serialize_timestamp(completed_at),
@@ -334,15 +361,9 @@ pub async fn upsert_set(
     )
     .await?;
 
-    let set_id = fetch_set_id(
-        &mut conn,
-        session_id,
-        payload.exercise_id,
-        payload.set_number,
-    )
-    .await?;
+    let set_id = fetch_set_id(&mut conn, session_id, params.exercise_id, params.set_number).await?;
 
-    Ok(Json(UpsertSetResponse { set_id, session_id }))
+    Ok(Json(SetForDayResponse { set_id, session_id }))
 }
 
 pub async fn get_exercise_graph(
