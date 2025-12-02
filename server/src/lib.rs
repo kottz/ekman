@@ -69,9 +69,11 @@ pub fn build_router(state: AppState, cors_layer: CorsLayer) -> Router {
         )
         .route(
             "/api/exercises/{id}",
-            get(handlers::get_exercise)
-                .patch(handlers::update_exercise)
-                .delete(handlers::archive_exercise),
+            get(handlers::get_exercise).patch(handlers::update_exercise),
+        )
+        .route(
+            "/api/exercises/{id}/archive",
+            post(handlers::archive_exercise),
         )
         .with_state(state)
         .layer(CompressionLayer::new())
