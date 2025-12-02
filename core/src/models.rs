@@ -9,6 +9,7 @@ pub struct Exercise {
     pub name: String,
     pub description: Option<String>,
     pub archived: bool,
+    pub owner: ExerciseOwner,
 }
 
 #[derive(Debug, Deserialize, Serialize, Clone)]
@@ -41,6 +42,13 @@ pub struct PopulatedExercise {
     pub target_sets: Option<i32>,
     pub last_day_date: Option<DateTime<Utc>>,
     pub last_day_sets: Vec<SetCompact>,
+}
+
+#[derive(Debug, Serialize, Deserialize, Clone, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum ExerciseOwner {
+    User,
+    Admin,
 }
 
 // Set models ------------------------------------------------------

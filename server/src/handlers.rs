@@ -29,8 +29,8 @@ use ekman_core::{
     logic::{SetDataPoint, build_graph_points},
     models::{
         ActivityDay, ActivityRequest, ActivityResponse, CreateExerciseRequest,
-        DayExerciseSetsResponse, Exercise, GraphRequest, GraphResponse, LoginRequest,
-        LoginResponse, MeResponse, MetricKind, PopulatedExercise, PopulatedTemplate,
+        DayExerciseSetsResponse, Exercise, ExerciseOwner, GraphRequest, GraphResponse,
+        LoginRequest, LoginResponse, MeResponse, MetricKind, PopulatedExercise, PopulatedTemplate,
         RegisterRequest, SetCompact, SetForDayItem, SetForDayRequest, SetForDayResponse,
         TotpSetupResponse, TotpVerifyRequest, UpdateExerciseRequest,
     },
@@ -458,8 +458,8 @@ pub async fn list_exercises(
     let user = resolve_user_from_session(&mut conn, &headers).await?;
     let mut rows = conn
         .query(
-            "SELECT id, name, description, archived FROM exercises \
-             WHERE user_id = ?1 AND archived = FALSE \
+            "SELECT id, name, description, archived, user_id FROM exercises \
+             WHERE (user_id = ?1 OR user_id IS NULL) AND archived = FALSE \
              ORDER BY name",
             [user.id],
         )
@@ -471,11 +471,17 @@ pub async fn list_exercises(
         let name: String = row.get(1)?;
         let description: Option<String> = row.get(2)?;
         let archived_value: i64 = row.get(3)?;
+        let owner_id: Option<i64> = row.get(4)?;
         exercises.push(Exercise {
             id,
             name,
             description,
             archived: archived_value != 0,
+            owner: if owner_id.is_some() {
+                ExerciseOwner::User
+            } else {
+                ExerciseOwner::Admin
+            },
         });
     }
 
@@ -507,6 +513,7 @@ pub async fn create_exercise(
         name,
         description,
         archived: false,
+        owner: ExerciseOwner::User,
     }))
 }
 
@@ -515,7 +522,7 @@ pub async fn update_exercise(
     headers: HeaderMap,
     Path(exercise_id): Path<i64>,
     Json(payload): Json<UpdateExerciseRequest>,
-) -> AppResult<impl IntoResponse> {
+) -> AppResult<Json<Exercise>> {
     if payload.name.is_none() && payload.description.is_none() && payload.archived.is_none() {
         return Err(AppError::BadRequest(
             "no fields provided for update".to_string(),
@@ -552,14 +559,15 @@ pub async fn update_exercise(
         return Err(AppError::NotFound("exercise not found".to_string()));
     }
 
-    Ok(StatusCode::NO_CONTENT)
+    let exercise = fetch_exercise(&conn, exercise_id, user.id).await?;
+    Ok(Json(exercise))
 }
 
 pub async fn archive_exercise(
     State(state): State<AppState>,
     Path(exercise_id): Path<i64>,
     headers: HeaderMap,
-) -> AppResult<impl IntoResponse> {
+) -> AppResult<Json<Exercise>> {
     let mut conn = state.db.connect()?;
     let user = resolve_user_from_session(&mut conn, &headers).await?;
     let updated = conn
@@ -573,7 +581,8 @@ pub async fn archive_exercise(
         return Err(AppError::NotFound("exercise not found".to_string()));
     }
 
-    Ok(StatusCode::NO_CONTENT)
+    let exercise = fetch_exercise(&conn, exercise_id, user.id).await?;
+    Ok(Json(exercise))
 }
 
 async fn load_last_days(
@@ -993,7 +1002,7 @@ async fn fetch_exercise_name(
     user_id: i64,
 ) -> AppResult<String> {
     let mut stmt = conn
-        .prepare("SELECT name FROM exercises WHERE id = ?1 AND user_id = ?2")
+        .prepare("SELECT name FROM exercises WHERE id = ?1 AND (user_id = ?2 OR user_id IS NULL)")
         .await?;
     let row = stmt
         .query_row((exercise_id, user_id))
@@ -1009,6 +1018,44 @@ async fn fetch_exercise_name(
     Ok(name)
 }
 
+async fn fetch_exercise(conn: &Connection, exercise_id: i64, user_id: i64) -> AppResult<Exercise> {
+    let mut stmt = conn
+        .prepare(
+            "SELECT id, name, description, archived, user_id \
+             FROM exercises \
+             WHERE id = ?1 AND (user_id = ?2 OR user_id IS NULL)",
+        )
+        .await?;
+
+    let row = stmt
+        .query_row((exercise_id, user_id))
+        .await
+        .map_err(|err| match err {
+            turso::Error::QueryReturnedNoRows => {
+                AppError::NotFound("exercise not found".to_string())
+            }
+            other => other.into(),
+        })?;
+
+    let id: i64 = row.get(0)?;
+    let name: String = row.get(1)?;
+    let description: Option<String> = row.get(2)?;
+    let archived_val: i64 = row.get(3)?;
+    let owner_id: Option<i64> = row.get(4)?;
+
+    Ok(Exercise {
+        id,
+        name,
+        description,
+        archived: archived_val != 0,
+        owner: if owner_id.is_some() {
+            ExerciseOwner::User
+        } else {
+            ExerciseOwner::Admin
+        },
+    })
+}
+
 async fn fetch_exercise_sets(
     conn: &Connection,
     exercise_id: i64,
@@ -1020,7 +1067,7 @@ async fn fetch_exercise_sets(
         "SELECT ws.day, ws.weight_kg, ws.reps, ws.completed_at \
          FROM workout_sets ws \
          JOIN exercises e ON e.id = ws.exercise_id \
-         WHERE ws.exercise_id = ?1 AND e.user_id = ?2",
+         WHERE ws.exercise_id = ?1 AND (e.user_id = ?2 OR e.user_id IS NULL)",
     );
 
     let mut params: Vec<Value> = vec![exercise_id.into(), user_id.into()];
