@@ -136,10 +136,6 @@ pub struct DayExerciseSetsResponse {
     pub sets: Vec<SetForDayItem>,
 }
 
-// Temporary aliases for older callers; prefer the new SetForDay* names.
-pub type UpsertSetRequest = SetForDayRequest;
-pub type UpsertSetResponse = SetForDayResponse;
-
 // Auth -----------------------------------------------------------
 
 #[derive(Debug, Deserialize, Serialize, Clone)]
