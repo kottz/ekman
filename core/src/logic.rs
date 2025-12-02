@@ -6,7 +6,6 @@ use crate::models::{GraphPoint, MetricKind};
 
 #[derive(Debug, Clone)]
 pub struct SetDataPoint {
-    pub session_id: i64,
     pub date: NaiveDate,
     pub weight: f64,
     pub reps: i32,
@@ -20,8 +19,8 @@ pub fn estimate_one_rm(weight: f64, reps: i32) -> f64 {
     weight * (1.0 + reps as f64 / 30.0)
 }
 
-/// Computes the specific metric for a list of sets (usually belonging to one session).
-pub fn compute_session_metric(metric: MetricKind, sets: &[SetDataPoint]) -> f64 {
+/// Computes the specific metric for a list of sets for a given day.
+pub fn compute_day_metric(metric: MetricKind, sets: &[SetDataPoint]) -> f64 {
     match metric {
         MetricKind::MaxWeight => sets.iter().fold(0.0_f64, |acc, set| acc.max(set.weight)),
         MetricKind::SessionTotalVolume => sets.iter().map(|set| set.weight * set.reps as f64).sum(),
@@ -43,19 +42,15 @@ pub fn build_graph_points(
         return Vec::new();
     }
 
-    let mut grouped: HashMap<i64, Vec<SetDataPoint>> = HashMap::new();
+    let mut grouped: HashMap<NaiveDate, Vec<SetDataPoint>> = HashMap::new();
     for set in sets {
-        grouped.entry(set.session_id).or_default().push(set);
+        grouped.entry(set.date).or_default().push(set);
     }
 
     let mut points: Vec<(NaiveDate, f64)> = grouped
-        .into_values()
-        .map(|session_sets| {
-            let date = session_sets
-                .first()
-                .map(|s| s.date)
-                .unwrap_or_else(|| Utc::now().date_naive());
-            let value = compute_session_metric(metric, &session_sets);
+        .into_iter()
+        .map(|(date, day_sets)| {
+            let value = compute_day_metric(metric, &day_sets);
             (date, value)
         })
         .collect();
@@ -119,19 +114,16 @@ mod tests {
     fn sample_sets() -> Vec<SetDataPoint> {
         vec![
             SetDataPoint {
-                session_id: 1,
                 date: NaiveDate::from_ymd_opt(2024, 5, 1).unwrap(),
                 weight: 100.0,
                 reps: 5,
             },
             SetDataPoint {
-                session_id: 1,
                 date: NaiveDate::from_ymd_opt(2024, 5, 1).unwrap(),
                 weight: 105.0,
                 reps: 3,
             },
             SetDataPoint {
-                session_id: 2,
                 date: NaiveDate::from_ymd_opt(2024, 5, 8).unwrap(),
                 weight: 110.0,
                 reps: 2,
@@ -147,21 +139,18 @@ mod tests {
     }
 
     #[test]
-    fn computes_session_metrics() {
+    fn computes_day_metrics() {
         let sets = sample_sets();
+        assert_eq!(compute_day_metric(MetricKind::MaxWeight, &sets[..2]), 105.0);
         assert_eq!(
-            compute_session_metric(MetricKind::MaxWeight, &sets[..2]),
-            105.0
-        );
-        assert_eq!(
-            compute_session_metric(MetricKind::SessionTotalVolume, &sets[..2]),
+            compute_day_metric(MetricKind::SessionTotalVolume, &sets[..2]),
             100.0 * 5.0 + 105.0 * 3.0
         );
         assert_eq!(
-            compute_session_metric(MetricKind::BestSetVolume, &sets[..2]),
+            compute_day_metric(MetricKind::BestSetVolume, &sets[..2]),
             100.0 * 5.0
         );
-        assert!(compute_session_metric(MetricKind::Est1Rm, &sets[..2]) > 105.0);
+        assert!(compute_day_metric(MetricKind::Est1Rm, &sets[..2]) > 105.0);
     }
 
     #[test]
@@ -169,7 +158,6 @@ mod tests {
         let mut sets = Vec::new();
         for day in 1..=6_i64 {
             sets.push(SetDataPoint {
-                session_id: day,
                 date: NaiveDate::from_ymd_opt(2024, 6, day as u32).unwrap(),
                 weight: 50.0 + day as f64,
                 reps: 5,

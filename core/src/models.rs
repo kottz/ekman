@@ -39,44 +39,16 @@ pub struct PopulatedExercise {
     pub exercise_id: i64,
     pub name: String,
     pub target_sets: Option<i32>,
-    pub last_session_date: Option<DateTime<Utc>>,
-    pub last_session_sets: Vec<SetCompact>,
+    pub last_day_date: Option<DateTime<Utc>>,
+    pub last_day_sets: Vec<SetCompact>,
 }
 
-// Session & set models ------------------------------------------------------
+// Set models ------------------------------------------------------
 
 #[derive(Debug, Serialize, Deserialize, Clone, PartialEq)]
 pub struct SetCompact {
     pub weight: f64,
     pub reps: i32,
-}
-
-#[derive(Debug, Deserialize, Serialize, Clone)]
-pub struct CreateSessionRequest {
-    pub notes: Option<String>,
-    pub sets: Vec<LogSetRequest>,
-}
-
-#[derive(Debug, Serialize, Deserialize, Clone)]
-pub struct CreateSessionResponse {
-    pub session_id: i64,
-}
-
-#[derive(Debug, Deserialize, Serialize, Clone)]
-pub struct LogSetRequest {
-    pub exercise_id: i64,
-    pub weight: f64,
-    pub reps: i32,
-    pub notes: Option<String>,
-    pub completed_at: Option<DateTime<Utc>>,
-}
-
-#[derive(Debug, Deserialize, Serialize, Clone)]
-pub struct UpdateSetRequest {
-    pub weight: Option<f64>,
-    pub reps: Option<i32>,
-    pub notes: Option<String>,
-    pub completed_at: Option<DateTime<Utc>>,
 }
 
 // Graph & analytics models --------------------------------------------------
@@ -140,7 +112,6 @@ pub struct SetForDayRequest {
 #[derive(Debug, Serialize, Deserialize, Clone)]
 pub struct SetForDayResponse {
     pub set_id: i64,
-    pub session_id: i64,
 }
 
 #[derive(Debug, Serialize, Deserialize, Clone)]
@@ -154,7 +125,6 @@ pub struct SetForDayItem {
 
 #[derive(Debug, Serialize, Deserialize, Clone)]
 pub struct DayExerciseSetsResponse {
-    pub session_id: Option<i64>,
     pub sets: Vec<SetForDayItem>,
 }
 
@@ -162,7 +132,7 @@ pub struct DayExerciseSetsResponse {
 pub type UpsertSetRequest = SetForDayRequest;
 pub type UpsertSetResponse = SetForDayResponse;
 
-// Auth & sessions -----------------------------------------------------------
+// Auth -----------------------------------------------------------
 
 #[derive(Debug, Deserialize, Serialize, Clone)]
 pub struct RegisterRequest {

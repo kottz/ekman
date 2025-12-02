@@ -294,7 +294,6 @@ impl App {
                         && let Some(set) = ex.sets.get_mut(set_index)
                     {
                         set.remote_id = Some(saved.set_id);
-                        set.session_id = Some(saved.session_id);
                     }
                 }
                 Err(e) => {
@@ -697,11 +696,11 @@ impl ExerciseState {
     pub fn from_populated(ex: &PopulatedExercise) -> Self {
         let set_count = ex.target_sets.unwrap_or(4).max(1) as usize;
         let should_prefill = ex
-            .last_session_date
+            .last_day_date
             .is_some_and(|d| Utc::now().signed_duration_since(d) <= ChronoDuration::days(90));
 
         let best_weight = if should_prefill {
-            ex.last_session_sets
+            ex.last_day_sets
                 .iter()
                 .map(|s| s.weight as f32)
                 .max_by(|a, b| a.total_cmp(b))
@@ -712,7 +711,7 @@ impl ExerciseState {
         let weight = best_weight.unwrap_or(0.0);
         let sets = (0..set_count)
             .map(|i| {
-                let reps = ex.last_session_sets.get(i).map(|s| s.reps.max(0) as u32);
+                let reps = ex.last_day_sets.get(i).map(|s| s.reps.max(0) as u32);
                 SetEntry::new(reps, weight, best_weight.is_some())
             })
             .collect();
@@ -857,7 +856,6 @@ pub struct SetEntry {
     pub weight: WeightEntry,
     pub started_at: Option<DateTime<Local>>,
     pub remote_id: Option<i64>,
-    pub session_id: Option<i64>,
 }
 
 impl SetEntry {
@@ -872,7 +870,6 @@ impl SetEntry {
             },
             started_at: None,
             remote_id: None,
-            session_id: None,
         }
     }
 

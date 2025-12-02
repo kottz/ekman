@@ -41,27 +41,19 @@ CREATE TABLE IF NOT EXISTS template_exercises (
     UNIQUE(template_id, display_order)
 );
 
-CREATE TABLE IF NOT EXISTS sessions (
-    id INTEGER PRIMARY KEY NOT NULL,
-    user_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
-    notes TEXT,
-    started_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
-    created_at DATETIME DEFAULT CURRENT_TIMESTAMP
-);
-
 CREATE TABLE IF NOT EXISTS workout_sets (
     id INTEGER PRIMARY KEY NOT NULL,
-    session_id INTEGER NOT NULL REFERENCES sessions(id) ON DELETE CASCADE,
     exercise_id INTEGER NOT NULL REFERENCES exercises(id),
+    day TEXT NOT NULL,
     set_number INTEGER NOT NULL,
     weight_kg REAL NOT NULL,
     reps INTEGER NOT NULL,
     notes TEXT,
     completed_at DATETIME NOT NULL,
-    UNIQUE(session_id, exercise_id, set_number)
+    UNIQUE(exercise_id, day, set_number)
 );
 
-CREATE INDEX IF NOT EXISTS idx_sets_session ON workout_sets(session_id);
+CREATE INDEX IF NOT EXISTS idx_sets_exercise_day ON workout_sets(exercise_id, day);
 CREATE INDEX IF NOT EXISTS idx_sets_exercise_time ON workout_sets(exercise_id, completed_at);
 
 CREATE TABLE IF NOT EXISTS auth_sessions (
