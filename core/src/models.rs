@@ -143,6 +143,21 @@ pub struct SetForDayResponse {
     pub session_id: i64,
 }
 
+#[derive(Debug, Serialize, Deserialize, Clone)]
+pub struct SetForDayItem {
+    pub set_id: i64,
+    pub set_number: i32,
+    pub weight: f64,
+    pub reps: i32,
+    pub completed_at: DateTime<Utc>,
+}
+
+#[derive(Debug, Serialize, Deserialize, Clone)]
+pub struct DayExerciseSetsResponse {
+    pub session_id: Option<i64>,
+    pub sets: Vec<SetForDayItem>,
+}
+
 // Temporary aliases for older callers; prefer the new SetForDay* names.
 pub type UpsertSetRequest = SetForDayRequest;
 pub type UpsertSetResponse = SetForDayResponse;

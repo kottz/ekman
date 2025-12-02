@@ -55,14 +55,13 @@ pub fn build_router(state: AppState, cors_layer: CorsLayer) -> Router {
             "/api/exercises/{id}/graph",
             get(handlers::get_exercise_graph),
         )
-        .route("/api/sessions", post(handlers::create_session))
         .route(
-            "/api/days/{date}/exercises/{exercise_id}/sets/{set_number}",
-            put(handlers::upsert_set_for_day),
+            "/api/days/{date}/exercises/{exercise_id}/sets",
+            get(handlers::get_sets_for_day_exercise),
         )
         .route(
-            "/api/sets/{id}",
-            patch(handlers::update_set).delete(handlers::delete_set),
+            "/api/days/{date}/exercises/{exercise_id}/sets/{set_number}",
+            put(handlers::upsert_set_for_day).delete(handlers::delete_set_for_day),
         )
         .route(
             "/api/exercises",

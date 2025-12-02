@@ -29,10 +29,10 @@ use ekman_core::{
     logic::{SetDataPoint, build_graph_points},
     models::{
         ActivityDay, ActivityRequest, ActivityResponse, CreateExerciseRequest,
-        CreateSessionRequest, CreateSessionResponse, Exercise, GraphRequest, GraphResponse,
-        LoginRequest, LoginResponse, MeResponse, MetricKind, PopulatedExercise, PopulatedTemplate,
-        RegisterRequest, SetCompact, SetForDayRequest, SetForDayResponse, TotpSetupResponse,
-        TotpVerifyRequest, UpdateExerciseRequest, UpdateSetRequest,
+        DayExerciseSetsResponse, Exercise, GraphRequest, GraphResponse, LoginRequest,
+        LoginResponse, MeResponse, MetricKind, PopulatedExercise, PopulatedTemplate,
+        RegisterRequest, SetCompact, SetForDayItem, SetForDayRequest, SetForDayResponse,
+        TotpSetupResponse, TotpVerifyRequest, UpdateExerciseRequest,
     },
 };
 
@@ -302,6 +302,12 @@ pub struct SetPathParams {
     set_number: i32,
 }
 
+#[derive(Deserialize)]
+pub struct DayExerciseParams {
+    date: String,
+    exercise_id: i64,
+}
+
 pub async fn upsert_set_for_day(
     State(state): State<AppState>,
     headers: HeaderMap,
@@ -366,6 +372,59 @@ pub async fn upsert_set_for_day(
     Ok(Json(SetForDayResponse { set_id, session_id }))
 }
 
+pub async fn delete_set_for_day(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Path(params): Path<SetPathParams>,
+) -> AppResult<impl IntoResponse> {
+    if params.set_number < 1 {
+        return Err(AppError::BadRequest(
+            "set_number must be at least 1".to_string(),
+        ));
+    }
+    let day = NaiveDate::parse_from_str(&params.date, "%Y-%m-%d").map_err(|_| {
+        AppError::BadRequest("invalid date format, expected YYYY-MM-DD".to_string())
+    })?;
+
+    let mut conn = state.db.connect()?;
+    let user = resolve_user_from_session(&mut conn, &headers).await?;
+
+    let deleted = conn
+        .execute(
+            "DELETE FROM workout_sets \
+             WHERE exercise_id = ?1 AND set_number = ?2 AND DATE(completed_at) = ?3 \
+             AND session_id IN (SELECT id FROM sessions WHERE user_id = ?4)",
+            (
+                params.exercise_id,
+                params.set_number,
+                day.to_string(),
+                user.id,
+            ),
+        )
+        .await?;
+
+    if deleted == 0 {
+        return Err(AppError::NotFound("set not found".to_string()));
+    }
+
+    Ok(StatusCode::NO_CONTENT)
+}
+
+pub async fn get_sets_for_day_exercise(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Path(params): Path<DayExerciseParams>,
+) -> AppResult<Json<DayExerciseSetsResponse>> {
+    let day = NaiveDate::parse_from_str(&params.date, "%Y-%m-%d").map_err(|_| {
+        AppError::BadRequest("invalid date format, expected YYYY-MM-DD".to_string())
+    })?;
+
+    let mut conn = state.db.connect()?;
+    let user = resolve_user_from_session(&mut conn, &headers).await?;
+    let response = fetch_sets_for_day_exercise(&mut conn, user.id, params.exercise_id, day).await?;
+    Ok(Json(response))
+}
+
 pub async fn get_exercise_graph(
     State(state): State<AppState>,
     Path(exercise_id): Path<i64>,
@@ -395,131 +454,6 @@ pub async fn get_exercise_graph(
     }))
 }
 
-pub async fn create_session(
-    State(state): State<AppState>,
-    headers: HeaderMap,
-    Json(payload): Json<CreateSessionRequest>,
-) -> AppResult<Json<CreateSessionResponse>> {
-    if payload.sets.is_empty() {
-        return Err(AppError::BadRequest(
-            "session must include at least one set".to_string(),
-        ));
-    }
-
-    let mut conn = state.db.connect()?;
-    let user = resolve_user_from_session(&mut conn, &headers).await?;
-    let tx = conn.transaction().await?;
-
-    tx.execute(
-        "INSERT INTO sessions (user_id, notes) VALUES (?1, ?2)",
-        (user.id, payload.notes.clone()),
-    )
-    .await?;
-    let session_id = tx.last_insert_rowid();
-
-    let mut next_set_number: HashMap<i64, i32> = HashMap::new();
-    for set in payload.sets {
-        let counter = next_set_number.entry(set.exercise_id).or_insert(0);
-        *counter += 1;
-
-        let completed_at = set.completed_at.unwrap_or_else(now_utc);
-        tx.execute(
-            "INSERT INTO workout_sets (session_id, exercise_id, set_number, weight_kg, reps, \
-             notes, completed_at) \
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
-            (
-                session_id,
-                set.exercise_id,
-                *counter,
-                set.weight,
-                set.reps,
-                set.notes.as_deref(),
-                serialize_timestamp(completed_at),
-            ),
-        )
-        .await?;
-    }
-
-    tx.commit().await?;
-
-    Ok(Json(CreateSessionResponse { session_id }))
-}
-
-pub async fn update_set(
-    State(state): State<AppState>,
-    headers: HeaderMap,
-    Path(set_id): Path<i64>,
-    Json(payload): Json<UpdateSetRequest>,
-) -> AppResult<impl IntoResponse> {
-    if payload.weight.is_none()
-        && payload.reps.is_none()
-        && payload.notes.is_none()
-        && payload.completed_at.is_none()
-    {
-        return Err(AppError::BadRequest(
-            "no fields provided for update".to_string(),
-        ));
-    }
-
-    let mut sql = String::from("UPDATE workout_sets SET ");
-    let mut params: Vec<Value> = Vec::new();
-    let mut parts: Vec<&str> = Vec::new();
-
-    if let Some(weight) = payload.weight {
-        parts.push("weight_kg = ?");
-        params.push(weight.into());
-    }
-    if let Some(reps) = payload.reps {
-        parts.push("reps = ?");
-        params.push(reps.into());
-    }
-    if let Some(notes) = payload.notes {
-        parts.push("notes = ?");
-        params.push(notes.into());
-    }
-    if let Some(completed_at) = payload.completed_at {
-        parts.push("completed_at = ?");
-        params.push(serialize_timestamp(completed_at).into());
-    }
-
-    sql.push_str(&parts.join(", "));
-    sql.push_str(" WHERE id = ?");
-    params.push(set_id.into());
-
-    let mut conn = state.db.connect()?;
-    let user = resolve_user_from_session(&mut conn, &headers).await?;
-    sql.push_str(" AND session_id IN (SELECT id FROM sessions WHERE user_id = ?)");
-    params.push(user.id.into());
-
-    let updated = conn.execute(&sql, params).await?;
-    if updated == 0 {
-        return Err(AppError::NotFound("set not found".to_string()));
-    }
-
-    Ok(StatusCode::NO_CONTENT)
-}
-
-pub async fn delete_set(
-    State(state): State<AppState>,
-    Path(set_id): Path<i64>,
-    headers: HeaderMap,
-) -> AppResult<impl IntoResponse> {
-    let mut conn = state.db.connect()?;
-    let user = resolve_user_from_session(&mut conn, &headers).await?;
-    let deleted = conn
-        .execute(
-            "DELETE FROM workout_sets WHERE id = ?1 AND session_id IN \
-             (SELECT id FROM sessions WHERE user_id = ?2)",
-            (set_id, user.id),
-        )
-        .await?;
-
-    if deleted == 0 {
-        return Err(AppError::NotFound("set not found".to_string()));
-    }
-
-    Ok(StatusCode::NO_CONTENT)
-}
 
 pub async fn list_exercises(
     State(state): State<AppState>,
@@ -808,6 +742,52 @@ async fn fetch_set_id(
         .await?;
     let set_id: i64 = row.get(0)?;
     Ok(set_id)
+}
+
+async fn fetch_sets_for_day_exercise(
+    conn: &mut Connection,
+    user_id: i64,
+    exercise_id: i64,
+    day: NaiveDate,
+) -> AppResult<DayExerciseSetsResponse> {
+    let day_str = day.format("%Y-%m-%d").to_string();
+    let mut rows = conn
+        .query(
+            "SELECT ws.id, ws.session_id, ws.set_number, ws.weight_kg, ws.reps, ws.completed_at \
+             FROM workout_sets ws \
+             JOIN sessions s ON s.id = ws.session_id \
+             WHERE s.user_id = ?1 AND ws.exercise_id = ?2 AND DATE(ws.completed_at) = ?3 \
+             ORDER BY ws.set_number",
+            (user_id, exercise_id, day_str),
+        )
+        .await?;
+
+    let mut sets = Vec::new();
+    let mut session_id: Option<i64> = None;
+
+    while let Some(row) = rows.next().await? {
+        let set_id: i64 = row.get(0)?;
+        let sess_id: i64 = row.get(1)?;
+        let set_number: i64 = row.get(2)?;
+        let weight: f64 = row.get(3)?;
+        let reps: i64 = row.get(4)?;
+        let completed_raw: String = row.get(5)?;
+        let completed_at = parse_timestamp(&completed_raw)?;
+
+        if session_id.is_none() {
+            session_id = Some(sess_id);
+        }
+
+        sets.push(SetForDayItem {
+            set_id,
+            set_number: set_number as i32,
+            weight,
+            reps: reps as i32,
+            completed_at,
+        });
+    }
+
+    Ok(DayExerciseSetsResponse { session_id, sets })
 }
 
 #[derive(Debug, Clone)]
