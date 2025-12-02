@@ -348,10 +348,10 @@ pub async fn upsert_set_for_day(
     let _ = fetch_exercise_name(&conn, params.exercise_id, user.id).await?;
 
     conn.execute(
-        "INSERT INTO workout_sets (exercise_id, day, set_number, weight_kg, reps, completed_at) \
-         VALUES (?1, ?2, ?3, ?4, ?5, ?6) \
-         ON CONFLICT(exercise_id, day, set_number) DO UPDATE SET \
-            weight_kg = excluded.weight_kg, reps = excluded.reps, completed_at = excluded.completed_at",
+            "INSERT INTO workout_sets (exercise_id, day, set_number, weight_kg, reps, completed_at) \
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6) \
+             ON CONFLICT(exercise_id, day, set_number) DO UPDATE SET \
+                weight_kg = excluded.weight_kg, reps = excluded.reps, completed_at = excluded.completed_at",
         (
             params.exercise_id,
             day.to_string(),

@@ -48,7 +48,6 @@ CREATE TABLE IF NOT EXISTS workout_sets (
     set_number INTEGER NOT NULL,
     weight_kg REAL NOT NULL,
     reps INTEGER NOT NULL,
-    notes TEXT,
     completed_at DATETIME NOT NULL,
     UNIQUE(exercise_id, day, set_number)
 );
