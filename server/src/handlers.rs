@@ -585,6 +585,17 @@ pub async fn archive_exercise(
     Ok(Json(exercise))
 }
 
+pub async fn get_exercise(
+    State(state): State<AppState>,
+    Path(exercise_id): Path<i64>,
+    headers: HeaderMap,
+) -> AppResult<Json<Exercise>> {
+    let mut conn = state.db.connect()?;
+    let user = resolve_user_from_session(&mut conn, &headers).await?;
+    let exercise = fetch_exercise(&conn, exercise_id, user.id).await?;
+    Ok(Json(exercise))
+}
+
 async fn load_last_days(
     state: &AppState,
     user_id: i64,

@@ -7,7 +7,7 @@ use std::net::SocketAddr;
 use axum::{
     Router,
     http::{HeaderValue, Method, header},
-    routing::{get, patch, post, put},
+    routing::{get, post, put},
 };
 use config::Config;
 use serde::Deserialize;
@@ -69,7 +69,9 @@ pub fn build_router(state: AppState, cors_layer: CorsLayer) -> Router {
         )
         .route(
             "/api/exercises/{id}",
-            patch(handlers::update_exercise).delete(handlers::archive_exercise),
+            get(handlers::get_exercise)
+                .patch(handlers::update_exercise)
+                .delete(handlers::archive_exercise),
         )
         .with_state(state)
         .layer(CompressionLayer::new())
