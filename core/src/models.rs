@@ -120,6 +120,12 @@ pub struct SetForDayRequest {
 #[derive(Debug, Serialize, Deserialize, Clone)]
 pub struct SetForDayResponse {
     pub set_id: i64,
+    pub exercise_id: i64,
+    pub day: String,
+    pub set_number: i32,
+    pub weight: f64,
+    pub reps: i32,
+    pub completed_at: DateTime<Utc>,
 }
 
 #[derive(Debug, Serialize, Deserialize, Clone)]
