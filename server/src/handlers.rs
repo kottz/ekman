@@ -346,7 +346,6 @@ pub async fn upsert_set_for_day(
     let user = resolve_user_from_session(&mut conn, &headers).await?;
     // Ensure the exercise belongs to the user.
     let _ = fetch_exercise_name(&conn, params.exercise_id, user.id).await?;
-
     conn.execute(
         "INSERT INTO workout_sets (exercise_id, day, set_number, weight_kg, reps, completed_at) \
          VALUES (?1, ?2, ?3, ?4, ?5, ?6) \

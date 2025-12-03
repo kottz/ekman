@@ -3,8 +3,9 @@
 use chrono::NaiveDate;
 use color_eyre::eyre::WrapErr;
 use ekman_core::models::{
-    ActivityRequest, ActivityResponse, GraphRequest, GraphResponse, LoginRequest, LoginResponse,
-    MeResponse, PopulatedTemplate, RegisterRequest, SetForDayRequest, SetForDayResponse,
+    ActivityRequest, ActivityResponse, DayExerciseSetsResponse, GraphRequest, GraphResponse,
+    LoginRequest, LoginResponse, MeResponse, PopulatedTemplate, RegisterRequest, SetForDayRequest,
+    SetForDayResponse,
 };
 use reqwest::Url;
 use reqwest::cookie::{CookieStore, Jar};
@@ -39,9 +40,12 @@ pub enum IoRequest {
     LoadDailyPlans,
     LoadGraph(i64),
     LoadActivityRange(ActivityRequest),
+    LoadSetsForDayExercise {
+        day: NaiveDate,
+        exercise_id: i64,
+    },
     SaveSet {
         exercise_id: i64,
-        set_index: usize,
         set_number: i32,
         day: NaiveDate,
         request: SetForDayRequest,
@@ -59,8 +63,14 @@ pub enum IoResponse {
     Activity(Result<ActivityResponse, String>),
     SetSaved {
         exercise_id: i64,
-        set_index: usize,
+        set_number: i32,
+        day: NaiveDate,
         result: Result<SetForDayResponse, String>,
+    },
+    SetsLoaded {
+        exercise_id: i64,
+        day: NaiveDate,
+        result: Result<DayExerciseSetsResponse, String>,
     },
 }
 
@@ -224,9 +234,18 @@ async fn run(
                     .map_err(|e| e.to_string());
                 IoResponse::Activity(result)
             }
+            IoRequest::LoadSetsForDayExercise { day, exercise_id } => {
+                let result = fetch_sets_for_day_exercise(&client, day, exercise_id)
+                    .await
+                    .map_err(|e| e.to_string());
+                IoResponse::SetsLoaded {
+                    exercise_id,
+                    day,
+                    result,
+                }
+            }
             IoRequest::SaveSet {
                 exercise_id,
-                set_index,
                 set_number,
                 day,
                 request,
@@ -236,7 +255,8 @@ async fn run(
                     .map_err(|e| e.to_string());
                 IoResponse::SetSaved {
                     exercise_id,
-                    set_index,
+                    set_number,
+                    day,
                     result,
                 }
             }
@@ -286,6 +306,27 @@ async fn fetch_activity(
     client
         .get(format!("{BACKEND_BASE_URL}{ACTIVITY_PATH}"))
         .query(&request)
+        .send()
+        .await
+        .wrap_err("request failed")?
+        .error_for_status()
+        .wrap_err("backend error")?
+        .json()
+        .await
+        .wrap_err("parse error")
+}
+
+async fn fetch_sets_for_day_exercise(
+    client: &reqwest::Client,
+    day: NaiveDate,
+    exercise_id: i64,
+) -> color_eyre::Result<DayExerciseSetsResponse> {
+    let url = format!(
+        "{BACKEND_BASE_URL}{DAYS_PATH}/{day}/exercises/{exercise_id}/sets",
+        day = day.format("%Y-%m-%d"),
+    );
+    client
+        .get(url)
         .send()
         .await
         .wrap_err("request failed")?

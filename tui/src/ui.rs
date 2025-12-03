@@ -415,7 +415,7 @@ fn render_exercise(frame: &mut Frame, area: Rect, ex: &ExerciseState, idx: usize
         .enumerate()
         .map(|(i, set)| {
             let mut text = set.reps_display();
-            if let Some(t) = set.started_at {
+            if let Some(t) = set.completed_at_local() {
                 let _ = write!(text, "\n{}", t.format("%H:%M:%S"));
             }
             let style = if selected && ex.focus == Focus::Reps && ex.set_cursor == i {

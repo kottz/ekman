@@ -43,6 +43,7 @@ fn run(
 
     while app.running {
         app.poll_io();
+        app.tick();
 
         terminal.draw(|frame| ui::render(app, frame))?;
 
