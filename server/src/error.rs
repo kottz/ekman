@@ -35,7 +35,11 @@ impl IntoResponse for AppError {
             AppError::Unauthorized => StatusCode::UNAUTHORIZED,
             AppError::Database(_) | AppError::Internal(_) => StatusCode::INTERNAL_SERVER_ERROR,
         };
-        tracing::error!("responding with status {}: {}", status, self);
+        if status.is_server_error() {
+            tracing::error!(status = %status, error = %self);
+        } else {
+            tracing::warn!(status = %status, error = %self);
+        }
 
         let body = Json(ErrorBody {
             error: self.to_string(),

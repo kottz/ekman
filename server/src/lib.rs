@@ -12,8 +12,13 @@ use axum::{
 use config::Config;
 use serde::Deserialize;
 use tokio::net::TcpListener;
-use tower_http::{compression::CompressionLayer, cors::CorsLayer, trace::TraceLayer};
-use tracing::info;
+use tower_http::{
+    compression::CompressionLayer,
+    cors::CorsLayer,
+    trace::{DefaultMakeSpan, DefaultOnFailure, DefaultOnRequest, DefaultOnResponse, TraceLayer},
+};
+use tracing::{Level, info};
+use tracing_subscriber::{EnvFilter, layer::SubscriberExt, util::SubscriberInitExt};
 
 pub use crate::db::init_database;
 pub use crate::error::{AppError, AppResult};
@@ -78,7 +83,13 @@ pub fn build_router(state: AppState, cors_layer: CorsLayer) -> Router {
         .with_state(state)
         .layer(CompressionLayer::new())
         .layer(cors_layer)
-        .layer(TraceLayer::new_for_http())
+        .layer(
+            TraceLayer::new_for_http()
+                .make_span_with(DefaultMakeSpan::new().level(Level::DEBUG))
+                .on_request(DefaultOnRequest::new().level(Level::DEBUG))
+                .on_response(DefaultOnResponse::new().level(Level::DEBUG))
+                .on_failure(DefaultOnFailure::new().level(Level::ERROR)),
+        )
 }
 
 fn load_config() -> AppResult<AppConfig> {
@@ -119,8 +130,20 @@ fn build_cors_layer(origins: &[String]) -> AppResult<CorsLayer> {
         .allow_headers([header::CONTENT_TYPE, header::AUTHORIZATION, header::ACCEPT]))
 }
 
+fn init_tracing() {
+    let env_filter = EnvFilter::try_from_default_env()
+        .or_else(|_| EnvFilter::try_new("warn,server=info,tower_http=warn"))
+        .unwrap_or_else(|_| EnvFilter::new("info"));
+
+    let subscriber = tracing_subscriber::registry()
+        .with(tracing_subscriber::fmt::layer().with_target(false))
+        .with(env_filter);
+
+    let _ = subscriber.try_init();
+}
+
 pub async fn run() -> AppResult<()> {
-    tracing_subscriber::fmt::init();
+    init_tracing();
 
     let app_config = load_config()?;
     let cors_layer = build_cors_layer(&app_config.server.cors_origins)?;
