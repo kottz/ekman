@@ -442,9 +442,12 @@ fn render_exercise(frame: &mut Frame, area: Rect, ex: &ExerciseState, idx: usize
 
     let inner = block.inner(area);
 
+    let visible_len = ex.visible_len(selected);
+
     let weight_cells: Vec<_> = ex
         .sets
         .iter()
+        .take(visible_len)
         .enumerate()
         .map(|(i, set)| {
             let style = if selected && ex.focus == Focus::Weight && ex.set_cursor == i {
@@ -459,6 +462,7 @@ fn render_exercise(frame: &mut Frame, area: Rect, ex: &ExerciseState, idx: usize
     let reps_cells: Vec<_> = ex
         .sets
         .iter()
+        .take(visible_len)
         .enumerate()
         .map(|(i, set)| {
             let mut text = set.reps_display();

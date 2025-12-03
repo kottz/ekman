@@ -515,6 +515,9 @@ impl App {
         if self.exercises.is_empty() {
             return;
         }
+        if let Some(current) = self.exercises.get_mut(self.selected) {
+            current.trim_trailing_empty_set();
+        }
         let len = self.exercises.len() as i32;
         let next = (self.selected as i32 + delta).clamp(0, len - 1);
         self.selected = next as usize;
@@ -548,6 +551,9 @@ impl App {
         }
 
         if self.selected + 1 < self.exercises.len() {
+            if let Some(current) = self.exercises.get_mut(self.selected) {
+                current.trim_trailing_empty_set();
+            }
             self.selected += 1;
             moved_exercise = true;
             if let Some(next) = self.exercises.get_mut(self.selected) {
@@ -586,6 +592,9 @@ impl App {
         }
 
         if self.selected > 0 {
+            if let Some(current) = self.exercises.get_mut(self.selected) {
+                current.trim_trailing_empty_set();
+            }
             self.selected -= 1;
             moved_exercise = true;
             if let Some(prev) = self.exercises.get_mut(self.selected) {
@@ -1067,17 +1076,55 @@ impl ExerciseState {
         self.reset_input_timer();
     }
 
+    fn trim_trailing_empty_set(&mut self) {
+        if self.sets.len() <= 1 {
+            return;
+        }
+
+        while self.sets.len() > 1 && self.sets.last().is_some_and(SetEntry::is_new_empty) {
+            self.sets.pop();
+        }
+
+        self.set_cursor = self.set_cursor.min(self.sets.len().saturating_sub(1));
+
+        if let Some(last) = self.sets.last() {
+            self.default_weight = last.weight.value;
+        }
+    }
+
+    pub fn visible_len(&self, selected: bool) -> usize {
+        if selected {
+            return self.sets.len().max(1);
+        }
+
+        let trailing_empty = self
+            .sets
+            .iter()
+            .rev()
+            .take_while(|s| s.is_new_empty())
+            .count();
+
+        let kept = self.sets.len().saturating_sub(trailing_empty);
+        kept.max(1)
+    }
+
     pub fn apply_sets_response(&mut self, response: DayExerciseSetsResponse) {
         if response.sets.is_empty() {
-            self.sets = vec![SetEntry::blank(1, self.default_weight, true)];
+            let weight = self
+                .sets
+                .last()
+                .map(|s| s.weight.value)
+                .unwrap_or(self.default_weight);
+            self.sets = vec![SetEntry::blank(1, weight, true)];
         } else {
             self.sets = response.sets.into_iter().map(SetEntry::from_item).collect();
-            self.set_cursor = self.set_cursor.min(self.sets.len().saturating_sub(1));
-            if let Some(last) = self.sets.last() {
-                self.default_weight = last.weight.value;
-            }
         }
+
         self.set_cursor = self.set_cursor.min(self.sets.len().saturating_sub(1));
+
+        if let Some(last) = self.sets.last() {
+            self.default_weight = last.weight.value;
+        }
     }
 
     pub fn apply_saved_set(&mut self, response: &SetForDayResponse) {
@@ -1199,6 +1246,10 @@ impl SetEntry {
         }
         self.completed_at = Some(response.completed_at);
         self.pending = false;
+    }
+
+    fn is_new_empty(&self) -> bool {
+        self.set_id.is_none() && self.reps.is_none() && self.completed_at.is_none() && !self.pending
     }
 
     fn mark_pending(&mut self) {
