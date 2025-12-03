@@ -344,6 +344,25 @@ impl App {
                     }
                 }
             }
+            IoResponse::SetDeleted {
+                exercise_id,
+                set_number,
+                day,
+                result,
+            } => {
+                if day != self.day {
+                    return;
+                }
+                match result {
+                    Ok(()) => {
+                        self.status.backend = format!("Deleted set {}.", set_number);
+                        self.request_sets_for(exercise_id);
+                    }
+                    Err(e) => {
+                        self.status.backend = format!("Delete set error: {e}");
+                    }
+                }
+            }
         }
         if self.view == View::Dashboard {
             self.refresh_status();
@@ -586,6 +605,49 @@ impl App {
             self.sync_set(self.selected, set_idx);
         }
         self.refresh_status();
+    }
+
+    pub fn delete_current_set(&mut self) {
+        let Some(ex) = self.exercises.get_mut(self.selected) else {
+            return;
+        };
+        let Some(exercise_id) = ex.exercise_id else {
+            self.status.backend = "Cannot delete: exercise missing id".into();
+            return;
+        };
+        if ex.sets.is_empty() {
+            return;
+        }
+
+        let set_number = ex
+            .sets
+            .get(ex.set_cursor)
+            .map(|s| s.set_number)
+            .unwrap_or(1);
+        let removed_set = ex.sets.remove(ex.set_cursor);
+        if ex.sets.is_empty() {
+            ex.sets.push(SetEntry::blank(1, ex.default_weight, true));
+        }
+        for (i, set) in ex.sets.iter_mut().enumerate() {
+            set.set_number = i as i32 + 1;
+        }
+        if ex.set_cursor >= ex.sets.len() {
+            ex.set_cursor = ex.sets.len().saturating_sub(1);
+        }
+        if let Some(last) = ex.sets.last() {
+            ex.default_weight = last.weight.value;
+        }
+
+        if removed_set.set_id.is_some() {
+            self.status.backend = format!("Deleting set {}...", set_number);
+            let _ = self.io_tx.try_send(IoRequest::DeleteSet {
+                exercise_id,
+                set_number,
+                day: self.day,
+            });
+        } else {
+            self.status.backend = format!("Removed set {} locally", set_number);
+        }
     }
 
     fn advance_set(&mut self) {

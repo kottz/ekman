@@ -16,6 +16,7 @@ pub enum Command {
     PrevSet,
     BumpWeightUp,
     BumpWeightDown,
+    DeleteSet,
     Digit(char),
     Backspace,
 }
@@ -36,6 +37,7 @@ impl FromStr for Command {
             "prev-set" => Ok(Self::PrevSet),
             "bump-weight-up" => Ok(Self::BumpWeightUp),
             "bump-weight-down" => Ok(Self::BumpWeightDown),
+            "delete-set" => Ok(Self::DeleteSet),
             "backspace" => Ok(Self::Backspace),
             _ => Err(()),
         }
@@ -58,6 +60,7 @@ impl Command {
             Self::PrevSet => "prev-set",
             Self::BumpWeightUp => "bump-weight-up",
             Self::BumpWeightDown => "bump-weight-down",
+            Self::DeleteSet => "delete-set",
             Self::Digit(_) => "digit",
             Self::Backspace => "backspace",
         }

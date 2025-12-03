@@ -120,6 +120,10 @@ fn execute(app: &mut App, cmd: Command) {
             }
             app.refresh_status();
         }
+        Command::DeleteSet => {
+            app.delete_current_set();
+            app.refresh_status();
+        }
         Command::Digit(ch) => app.input_digit(ch),
         Command::Backspace => app.backspace(),
     }

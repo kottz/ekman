@@ -60,6 +60,7 @@ impl KeyBindings {
         // Weight adjustment
         bindings.insert(key(KeyCode::Char('w')), Command::BumpWeightUp);
         bindings.insert(key(KeyCode::Char('f')), Command::BumpWeightDown);
+        bindings.insert(key(KeyCode::Char('d')), Command::DeleteSet);
 
         // Editing
         bindings.insert(key(KeyCode::Backspace), Command::Backspace);

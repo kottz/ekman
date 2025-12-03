@@ -18,6 +18,7 @@ use base32::encode as base32_encode;
 use chrono::{DateTime, Duration as ChronoDuration, NaiveDate, Utc};
 use serde::Deserialize;
 use totp_rs::{Algorithm, Secret, TOTP};
+use tracing::debug;
 use turso::{Connection, Value};
 
 use crate::{
@@ -391,24 +392,29 @@ pub async fn delete_set_for_day(
 
     let mut conn = state.db.connect()?;
     let user = resolve_user_from_session(&mut conn, &headers).await?;
+    // Ensure the exercise belongs to the user.
+    let _ = fetch_exercise_name(&conn, params.exercise_id, user.id).await?;
+    debug!(
+        "delete_set_for_day user_id={} exercise_id={} day={} set_number={}",
+        user.id, params.exercise_id, params.date, params.set_number
+    );
 
     let deleted = conn
         .execute(
             "DELETE FROM workout_sets \
-             WHERE exercise_id = ?1 AND set_number = ?2 AND day = ?3 \
-             AND exercise_id IN (SELECT id FROM exercises WHERE user_id = ?4)",
-            (
-                params.exercise_id,
-                params.set_number,
-                day.to_string(),
-                user.id,
-            ),
+             WHERE exercise_id = ?1 AND set_number = ?2 AND day = ?3",
+            (params.exercise_id, params.set_number, day.to_string()),
         )
         .await?;
 
     if deleted == 0 {
         return Err(AppError::NotFound("set not found".to_string()));
     }
+
+    debug!(
+        "delete_set_for_day removed {} row(s) for exercise_id={} day={} set_number={}",
+        deleted, params.exercise_id, params.date, params.set_number
+    );
 
     Ok(StatusCode::NO_CONTENT)
 }

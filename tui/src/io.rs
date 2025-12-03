@@ -50,6 +50,11 @@ pub enum IoRequest {
         day: NaiveDate,
         request: SetForDayRequest,
     },
+    DeleteSet {
+        exercise_id: i64,
+        set_number: i32,
+        day: NaiveDate,
+    },
 }
 
 /// Responses from the background task.
@@ -71,6 +76,12 @@ pub enum IoResponse {
         exercise_id: i64,
         day: NaiveDate,
         result: Result<DayExerciseSetsResponse, String>,
+    },
+    SetDeleted {
+        exercise_id: i64,
+        set_number: i32,
+        day: NaiveDate,
+        result: Result<(), String>,
     },
 }
 
@@ -260,6 +271,21 @@ async fn run(
                     result,
                 }
             }
+            IoRequest::DeleteSet {
+                exercise_id,
+                set_number,
+                day,
+            } => {
+                let result = delete_set(&client, day, exercise_id, set_number)
+                    .await
+                    .map_err(|e| e.to_string());
+                IoResponse::SetDeleted {
+                    exercise_id,
+                    set_number,
+                    day,
+                    result,
+                }
+            }
         };
 
         if tx.send(response).await.is_err() {
@@ -359,4 +385,24 @@ async fn save_set(
         .json()
         .await
         .wrap_err("parse error")
+}
+
+async fn delete_set(
+    client: &reqwest::Client,
+    day: NaiveDate,
+    exercise_id: i64,
+    set_number: i32,
+) -> color_eyre::Result<()> {
+    let url = format!(
+        "{BACKEND_BASE_URL}{DAYS_PATH}/{day}/exercises/{exercise_id}/sets/{set_number}",
+        day = day.format("%Y-%m-%d"),
+    );
+    client
+        .delete(url)
+        .send()
+        .await
+        .wrap_err("request failed")?
+        .error_for_status()
+        .wrap_err("backend error")?;
+    Ok(())
 }
