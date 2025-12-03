@@ -63,6 +63,7 @@ pub struct App {
     pub exercises: Vec<ExerciseState>,
     pub graphs: Vec<GraphResponse>,
     pub activity: Vec<ActivityDay>,
+    plans: Vec<PopulatedTemplate>,
     pub selected: usize,
     pub status: StatusLine,
     io_tx: mpsc::Sender<IoRequest>,
@@ -88,6 +89,7 @@ impl App {
             exercises: ExerciseState::defaults(),
             graphs: Vec::new(),
             activity: Vec::new(),
+            plans: Vec::new(),
             selected: 0,
             status: StatusLine::default(),
             io_tx,
@@ -274,6 +276,7 @@ impl App {
                 self.status.backend = format!("Backend error: {e}");
                 self.exercises = ExerciseState::defaults();
                 self.graphs.clear();
+                self.plans.clear();
                 self.loading_sets.clear();
             }
             IoResponse::Graph(id, Ok(graph)) => {
@@ -370,34 +373,8 @@ impl App {
     }
 
     fn apply_plans(&mut self, plans: Vec<PopulatedTemplate>) {
-        self.day = Utc::now().date_naive();
-        let plan = select_plan_for_today(&plans);
-
-        if let Some(plan) = plan {
-            let exercises: Vec<_> = plan
-                .exercises
-                .iter()
-                .map(ExerciseState::from_populated)
-                .collect();
-
-            if exercises.is_empty() {
-                self.status.backend = "No exercises in plan".into();
-                self.exercises = ExerciseState::defaults();
-            } else {
-                self.status.backend = format!("Loaded: {}", plan.name);
-                self.exercises = exercises;
-                self.request_graphs();
-            }
-        } else {
-            self.status.backend = "No plans available".into();
-            self.exercises = ExerciseState::defaults();
-        }
-
-        self.loading_sets.clear();
-        self.selected = 0;
-        self.graphs.clear();
-        self.pending_graphs.clear();
-        self.request_sets_for_all();
+        self.plans = plans;
+        self.set_day(self.day);
     }
 
     fn request_graphs(&mut self) {
@@ -466,6 +443,66 @@ impl App {
         for id in ids {
             self.request_sets_for(id);
         }
+    }
+
+    pub fn move_day(&mut self, delta: i64) {
+        if delta == 0 {
+            return;
+        }
+        let Some(next) = self.day.checked_add_signed(ChronoDuration::days(delta)) else {
+            return;
+        };
+        self.set_day(next);
+    }
+
+    pub fn jump_to_today(&mut self) {
+        let today = Utc::now().date_naive();
+        if self.day == today {
+            return;
+        }
+        self.set_day(today);
+    }
+
+    pub fn current_plan_name(&self) -> Option<&str> {
+        plan_for_day(&self.plans, self.day).map(|p| p.name.as_str())
+    }
+
+    fn set_day(&mut self, day: NaiveDate) {
+        self.day = day;
+        self.selected = 0;
+        self.loading_sets.clear();
+
+        let plan = plan_for_day(&self.plans, day);
+        if let Some(plan) = plan {
+            let exercises: Vec<_> = plan
+                .exercises
+                .iter()
+                .map(ExerciseState::from_populated)
+                .collect();
+
+            if exercises.is_empty() {
+                self.status.backend = "No exercises in plan".into();
+                self.exercises = ExerciseState::defaults();
+            } else {
+                self.status.backend = format!("{} • {}", plan.name, day.format("%a %b %e"));
+                self.exercises = exercises;
+            }
+        } else {
+            self.status.backend = "No plans available".into();
+            self.exercises = ExerciseState::defaults();
+        }
+
+        let ids: HashSet<_> = self
+            .exercises
+            .iter()
+            .filter_map(|ex| ex.exercise_id)
+            .collect();
+        self.graphs.retain(|g| ids.contains(&g.exercise_id));
+        self.pending_graphs.retain(|id| ids.contains(id));
+
+        self.refresh_status();
+        self.request_graphs();
+        self.request_sets_for_all();
     }
 
     pub fn current_exercise_mut(&mut self) -> Option<&mut ExerciseState> {
@@ -839,14 +876,14 @@ impl AuthState {
     }
 }
 
-fn select_plan_for_today(plans: &[PopulatedTemplate]) -> Option<&PopulatedTemplate> {
+fn plan_for_day(plans: &[PopulatedTemplate], day: NaiveDate) -> Option<&PopulatedTemplate> {
     if plans.is_empty() {
         return None;
     }
-    let today = Local::now().weekday().num_days_from_monday() as i32;
+    let weekday = day.weekday().num_days_from_monday() as i32;
     plans
         .iter()
-        .find(|p| p.day_of_week == Some(today))
+        .find(|p| p.day_of_week == Some(weekday))
         .or_else(|| plans.first())
 }
 

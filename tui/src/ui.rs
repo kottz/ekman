@@ -1,7 +1,7 @@
 //! UI rendering.
 
 use crate::state::{App, AuthField, AuthMode, ExerciseState, Focus};
-use chrono::Utc;
+use chrono::{NaiveDate, Utc};
 use ekman_core::models::{ActivityDay, GraphResponse};
 use qrcode::QrCode;
 use ratatui::{
@@ -15,7 +15,7 @@ use ratatui::{
 use std::fmt::Write;
 use tui_qrcode::{Colors, QrCodeWidget};
 
-const HINTS: &str = "←/→: set cursor • Tab/Shift+Tab: navigate • ↑/↓: weight/reps • W/F: ±2.5kg • N/E: exercise • digits: edit • q: quit";
+const HINTS: &str = "←/→: set cursor • Tab/Shift+Tab: navigate • ↑/↓: weight/reps • W/F: ±2.5kg • N/E: exercise • A/R: day ±1 • S: today • digits: edit • q: quit";
 
 pub fn render(app: &App, frame: &mut Frame) {
     if !app.is_authenticated() {
@@ -23,17 +23,21 @@ pub fn render(app: &App, frame: &mut Frame) {
         return;
     }
 
-    let [activity, main, status] = Layout::vertical([
-        Constraint::Length(3),
+    let [top, main, status] = Layout::vertical([
+        Constraint::Length(5),
         Constraint::Min(0),
         Constraint::Length(4),
     ])
     .areas(frame.area());
 
+    let [day_area, activity] =
+        Layout::horizontal([Constraint::Percentage(40), Constraint::Percentage(60)]).areas(top);
+
     let [graph_area, exercise_area] =
         Layout::horizontal([Constraint::Percentage(50), Constraint::Percentage(50)]).areas(main);
 
-    render_activity_bar(frame, activity, &app.activity);
+    render_day(frame, day_area, app);
+    render_activity_bar(frame, activity, &app.activity, app.day);
     render_graphs(frame, graph_area, &app.graphs);
     render_exercises(frame, exercise_area, &app.exercises, app.selected);
     render_status(frame, status, &app.status.exercise, &app.status.backend);
@@ -235,7 +239,46 @@ fn field_line(label: &str, value: &str, focused: bool, mask: bool) -> Line<'stat
     Line::from(spans)
 }
 
-fn render_activity_bar(frame: &mut Frame, area: Rect, days: &[ActivityDay]) {
+fn render_day(frame: &mut Frame, area: Rect, app: &App) {
+    let today = Utc::now().date_naive();
+    let offset = app.day.signed_duration_since(today).num_days();
+    let relative = match offset {
+        0 => "Today".to_string(),
+        1 => "Tomorrow".to_string(),
+        -1 => "Yesterday".to_string(),
+        d if d > 0 => format!("In {d} days"),
+        d => format!("{} days ago", d.abs()),
+    };
+
+    let plan = app
+        .current_plan_name()
+        .unwrap_or("No plan loaded for this day");
+
+    let lines = vec![
+        Line::from(vec![
+            Span::styled(app.day.format("%A").to_string(), Style::default().bold()),
+            Span::raw(format!(" • {}", app.day.format("%Y-%m-%d"))),
+        ]),
+        Line::from(format!("Plan: {plan}")),
+        Line::from(format!("{relative} • a: prev  s: today  r: next")),
+    ];
+
+    let block = Block::bordered().title("Day");
+
+    frame.render_widget(
+        Paragraph::new(lines)
+            .block(block)
+            .alignment(Alignment::Left),
+        area,
+    );
+}
+
+fn render_activity_bar(
+    frame: &mut Frame,
+    area: Rect,
+    days: &[ActivityDay],
+    current_day: NaiveDate,
+) {
     if days.is_empty() {
         frame.render_widget(
             Paragraph::new("No activity data").block(Block::bordered().title("Activity")),
@@ -245,6 +288,7 @@ fn render_activity_bar(frame: &mut Frame, area: Rect, days: &[ActivityDay]) {
     }
 
     let today = Utc::now().date_naive().format("%Y-%m-%d").to_string();
+    let selected = current_day.format("%Y-%m-%d").to_string();
     let mut spans: Vec<Span> = Vec::with_capacity(days.len() * 2);
 
     for (idx, day) in days.iter().enumerate() {
@@ -256,6 +300,9 @@ fn render_activity_bar(frame: &mut Frame, area: Rect, days: &[ActivityDay]) {
         let mut style = Style::default().fg(color);
         if day.date == today {
             style = style.bold();
+        }
+        if day.date == selected {
+            style = style.bold().add_modifier(Modifier::UNDERLINED);
         }
         spans.push(Span::styled("●", style));
         if idx + 1 < days.len() {

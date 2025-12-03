@@ -74,6 +74,9 @@ fn execute(app: &mut App, cmd: Command) {
         Command::Quit => app.running = false,
         Command::NextExercise => app.select_exercise(1),
         Command::PrevExercise => app.select_exercise(-1),
+        Command::NextDay => app.move_day(1),
+        Command::PrevDay => app.move_day(-1),
+        Command::Today => app.jump_to_today(),
         Command::NextField => {
             if let Some(ex) = app.current_exercise_mut() {
                 ex.toggle_focus();

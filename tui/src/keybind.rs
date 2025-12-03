@@ -41,6 +41,11 @@ impl KeyBindings {
         bindings.insert(key(KeyCode::Char('q')), Command::Quit);
         bindings.insert(ctrl(KeyCode::Char('c')), Command::Quit);
 
+        // Day navigation
+        bindings.insert(key(KeyCode::Char('a')), Command::PrevDay);
+        bindings.insert(key(KeyCode::Char('s')), Command::NextDay);
+        bindings.insert(key(KeyCode::Char('r')), Command::Today);
+
         // Navigation between exercises
         bindings.insert(key(KeyCode::Char('n')), Command::NextExercise);
         bindings.insert(key(KeyCode::Char('e')), Command::PrevExercise);
