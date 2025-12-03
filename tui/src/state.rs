@@ -397,7 +397,7 @@ impl App {
         self.selected = 0;
         self.graphs.clear();
         self.pending_graphs.clear();
-        self.request_sets_for_selected();
+        self.request_sets_for_all();
     }
 
     fn request_graphs(&mut self) {
@@ -454,6 +454,17 @@ impl App {
             .and_then(|ex| ex.exercise_id)
         {
             self.request_sets_for(exercise_id);
+        }
+    }
+
+    pub fn request_sets_for_all(&mut self) {
+        let ids: Vec<i64> = self
+            .exercises
+            .iter()
+            .filter_map(|ex| ex.exercise_id)
+            .collect();
+        for id in ids {
+            self.request_sets_for(id);
         }
     }
 
