@@ -315,6 +315,7 @@ impl App {
                         ex.apply_saved_set(&saved);
                         self.status.backend = format!("Saved set {} • {}", set_number, name);
                     }
+                    self.request_activity_history();
                 }
                 Err(e) => {
                     self.status.backend = format!("Save set error: {e}");
@@ -360,6 +361,7 @@ impl App {
                     Ok(()) => {
                         self.status.backend = format!("Deleted set {}.", set_number);
                         self.request_sets_for(exercise_id);
+                        self.request_activity_history();
                     }
                     Err(e) => {
                         self.status.backend = format!("Delete set error: {e}");
