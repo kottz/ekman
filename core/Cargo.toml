@@ -1,16 +1,12 @@
 [package]
-name = "core"
+name = "ekman_core"
 edition.workspace = true
 version.workspace = true
-
-[lib]
-name = "ekman_core"
 
 [dependencies]
 serde = { version = "1.0", features = ["derive"] }
 chrono = { version = "0.4", features = ["serde"] }
-thiserror = "1.0"
 
 [dev-dependencies]
+serde_json = "1.0"
 serde_urlencoded = "0.7"
-serde_json = "1.0.145"

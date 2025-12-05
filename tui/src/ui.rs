@@ -1,8 +1,8 @@
 //! UI rendering.
 
-use crate::state::{App, AuthField, AuthMode, ExerciseState, Focus};
-use chrono::{NaiveDate, Utc};
-use ekman_core::models::{ActivityDay, GraphResponse};
+use crate::state::{App, AuthField, ExerciseState, Focus, View};
+use chrono::Utc;
+use ekman_core::{ActivityDay, Graph};
 use qrcode::QrCode;
 use ratatui::{
     Frame,
@@ -15,14 +15,20 @@ use ratatui::{
 use std::fmt::Write;
 use tui_qrcode::{Colors, QrCodeWidget};
 
-const HINTS: &str = "←/→: set cursor • Tab/Shift+Tab: navigate • ↑/↓: weight/reps • W/F: ±2.5kg • N/E: exercise • A/R: day ±1 • S: today • digits: edit • q: quit";
+const HINTS: &str = "←/→: set • Tab: navigate • ↑/↓: weight/reps • W/F: ±2.5kg • N/E: exercise • A/S: day • R: today • D: delete • q: quit";
 
 pub fn render(app: &App, frame: &mut Frame) {
-    if !app.is_authenticated() {
-        render_auth(app, frame);
-        return;
+    match app.view {
+        View::Auth => render_auth(app, frame),
+        View::Dashboard => render_dashboard(app, frame),
     }
+}
 
+// ============================================================================
+// Dashboard
+// ============================================================================
+
+fn render_dashboard(app: &App, frame: &mut Frame) {
     let [top, main, status] = Layout::vertical([
         Constraint::Length(5),
         Constraint::Min(0),
@@ -30,229 +36,31 @@ pub fn render(app: &App, frame: &mut Frame) {
     ])
     .areas(frame.area());
 
-    let [day_area, activity] =
+    let [day_area, activity_area] =
         Layout::horizontal([Constraint::Percentage(40), Constraint::Percentage(60)]).areas(top);
 
     let [graph_area, exercise_area] =
         Layout::horizontal([Constraint::Percentage(50), Constraint::Percentage(50)]).areas(main);
 
     render_day(frame, day_area, app);
-    render_activity_bar(frame, activity, &app.activity, app.day);
+    render_activity(frame, activity_area, &app.activity, &app.day.to_string());
     render_graphs(frame, graph_area, &app.graphs);
     render_exercises(frame, exercise_area, &app.exercises, app.selected);
-    render_status(frame, status, &app.status.exercise, &app.status.backend);
-}
-
-fn render_auth(app: &App, frame: &mut Frame) {
-    let [header, body, footer] = Layout::vertical([
-        Constraint::Length(3),
-        Constraint::Min(12),
-        Constraint::Length(3),
-    ])
-    .areas(frame.area());
-
-    render_auth_header(frame, header, app);
-    render_auth_body(frame, body, app);
-    render_auth_footer(frame, footer, app);
-}
-
-fn render_auth_header(frame: &mut Frame, area: Rect, app: &App) {
-    let title = match app.auth.mode {
-        AuthMode::Login => "Login",
-        AuthMode::Register => "Register",
-    };
-
-    let tabs = Line::from(vec![
-        Span::styled(
-            " Login ",
-            if app.auth.mode == AuthMode::Login {
-                Style::default().bold().green()
-            } else {
-                Style::default().dim()
-            },
-        ),
-        Span::raw(" • "),
-        Span::styled(
-            " Register ",
-            if app.auth.mode == AuthMode::Register {
-                Style::default().bold().cyan()
-            } else {
-                Style::default().dim()
-            },
-        ),
-    ]);
-
-    let block = Block::bordered()
-        .title(format!("Ekman • {title}"))
-        .title_alignment(Alignment::Center);
-    let inner = block.inner(area);
-    frame.render_widget(block, area);
-    frame.render_widget(Paragraph::new(tabs).alignment(Alignment::Center), inner);
-}
-
-fn render_auth_body(frame: &mut Frame, area: Rect, app: &App) {
-    let columns: [Rect; 2] = Layout::horizontal([
-        Constraint::Percentage(if app.auth.mode == AuthMode::Register {
-            55
-        } else {
-            70
-        }),
-        Constraint::Percentage(if app.auth.mode == AuthMode::Register {
-            45
-        } else {
-            30
-        }),
-    ])
-    .areas(area);
-
-    render_auth_form(frame, columns[0], app);
-
-    if app.auth.mode == AuthMode::Register {
-        render_auth_qr(frame, columns[1], app);
-    } else {
-        render_auth_help(frame, columns[1]);
-    }
-}
-
-fn render_auth_form(frame: &mut Frame, area: Rect, app: &App) {
-    let auth = &app.auth;
-    let mut lines = Vec::new();
-
-    lines.push(field_line(
-        "Username",
-        &auth.username,
-        auth.focus == AuthField::Username,
-        false,
-    ));
-    lines.push(field_line(
-        "Password",
-        &auth.password,
-        auth.focus == AuthField::Password,
-        true,
-    ));
-    lines.push(field_line(
-        "TOTP code",
-        &auth.totp_code,
-        auth.focus == AuthField::Totp,
-        false,
-    ));
-
-    if auth.mode == AuthMode::Register {
-        lines.push(Line::from(""));
-        lines.push(Line::from(vec![
-            Span::styled("Secret: ", Style::default().bold()),
-            Span::raw(auth.totp_secret.clone()),
-        ]));
-        lines.push(Line::from(vec![
-            Span::styled("otpauth:// ", Style::default().bold()),
-            Span::raw(auth.otpauth_url.clone()),
-        ]));
-    }
-
-    let block = Block::bordered().title(match auth.mode {
-        AuthMode::Login => "Enter credentials",
-        AuthMode::Register => "Create account (2FA required)",
-    });
-
-    frame.render_widget(
-        Paragraph::new(lines)
-            .block(block)
-            .alignment(Alignment::Left),
-        area,
-    );
-}
-
-fn render_auth_qr(frame: &mut Frame, area: Rect, app: &App) {
-    let chunks: [Rect; 2] =
-        Layout::vertical([Constraint::Min(10), Constraint::Length(5)]).areas(area);
-    let qr_block = Block::bordered().title("Scan QR in your authenticator");
-    let qr_inner = qr_block.inner(chunks[0]);
-    frame.render_widget(qr_block, chunks[0]);
-
-    match QrCode::new(app.auth.otpauth_url.as_bytes()) {
-        Ok(code) => {
-            let widget = QrCodeWidget::new(code).colors(Colors::Inverted);
-            frame.render_widget(widget, qr_inner);
-        }
-        Err(_) => frame.render_widget(
-            Paragraph::new("Unable to render QR").alignment(Alignment::Center),
-            qr_inner,
-        ),
-    }
-
-    let info = Paragraph::new(vec![
-        Line::from("1) Scan the QR code."),
-        Line::from("2) Enter the current 6-digit code from your app."),
-        Line::from("Ctrl+G to generate a new secret."),
-    ])
-    .block(Block::bordered().title("Instructions"));
-
-    frame.render_widget(info, chunks[1]);
-}
-
-fn render_auth_help(frame: &mut Frame, area: Rect) {
-    let help = Paragraph::new(vec![
-        Line::from("Enter username, password, and 6-digit TOTP code."),
-        Line::from("Ctrl+R to jump to register."),
-        Line::from("Tab/Shift+Tab to move fields, Enter to submit."),
-    ])
-    .block(Block::bordered().title("Help"));
-
-    frame.render_widget(help, area);
-}
-
-fn render_auth_footer(frame: &mut Frame, area: Rect, app: &App) {
-    let status = if !app.auth.status.is_empty() {
-        app.auth.status.clone()
-    } else {
-        "Ctrl+L login • Ctrl+R register • Ctrl+G new secret • Esc quits".into()
-    };
-    frame.render_widget(
-        Paragraph::new(status)
-            .alignment(Alignment::Center)
-            .block(Block::bordered()),
-        area,
-    );
-}
-
-fn field_line(label: &str, value: &str, focused: bool, mask: bool) -> Line<'static> {
-    let mut display = if mask {
-        "•".repeat(value.chars().count())
-    } else {
-        value.to_string()
-    };
-    if display.is_empty() {
-        display = "_".repeat(6);
-    }
-
-    let mut spans = vec![
-        Span::styled(format!("{label}: "), Style::default().bold()),
-        Span::raw(display),
-    ];
-
-    if focused {
-        for span in spans.iter_mut() {
-            span.style = span.style.fg(Color::Yellow).add_modifier(Modifier::BOLD);
-        }
-    }
-
-    Line::from(spans)
+    render_status(frame, status, &app.status);
 }
 
 fn render_day(frame: &mut Frame, area: Rect, app: &App) {
     let today = Utc::now().date_naive();
     let offset = app.day.signed_duration_since(today).num_days();
     let relative = match offset {
-        0 => "Today".to_string(),
-        1 => "Tomorrow".to_string(),
-        -1 => "Yesterday".to_string(),
+        0 => "Today".into(),
+        1 => "Tomorrow".into(),
+        -1 => "Yesterday".into(),
         d if d > 0 => format!("In {d} days"),
         d => format!("{} days ago", d.abs()),
     };
 
-    let plan = app
-        .current_plan_name()
-        .unwrap_or("No plan loaded for this day");
+    let plan = app.current_plan_name().unwrap_or("No plan");
 
     let lines = vec![
         Line::from(vec![
@@ -260,25 +68,16 @@ fn render_day(frame: &mut Frame, area: Rect, app: &App) {
             Span::raw(format!(" • {}", app.day.format("%Y-%m-%d"))),
         ]),
         Line::from(format!("Plan: {plan}")),
-        Line::from(format!("{relative} • a: prev  s: today  r: next")),
+        Line::from(format!("{relative} • a/s: prev/next  r: today")),
     ];
 
-    let block = Block::bordered().title("Day");
-
     frame.render_widget(
-        Paragraph::new(lines)
-            .block(block)
-            .alignment(Alignment::Left),
+        Paragraph::new(lines).block(Block::bordered().title("Day")),
         area,
     );
 }
 
-fn render_activity_bar(
-    frame: &mut Frame,
-    area: Rect,
-    days: &[ActivityDay],
-    current_day: NaiveDate,
-) {
+fn render_activity(frame: &mut Frame, area: Rect, days: &[ActivityDay], selected: &str) {
     if days.is_empty() {
         frame.render_widget(
             Paragraph::new("No activity data").block(Block::bordered().title("Activity")),
@@ -288,15 +87,15 @@ fn render_activity_bar(
     }
 
     let today = Utc::now().date_naive().format("%Y-%m-%d").to_string();
-    let selected = current_day.format("%Y-%m-%d").to_string();
-    let mut spans: Vec<Span> = Vec::with_capacity(days.len() * 2);
+    let mut spans = Vec::with_capacity(days.len() * 2);
 
-    for (idx, day) in days.iter().enumerate() {
+    for (i, day) in days.iter().enumerate() {
         let color = match day.sets_completed {
             c if c >= 9 => Color::Green,
             c if c >= 1 => Color::Yellow,
             _ => Color::Red,
         };
+
         let mut style = Style::default().fg(color);
         if day.date == today {
             style = style.bold();
@@ -304,23 +103,25 @@ fn render_activity_bar(
         if day.date == selected {
             style = style.bold().add_modifier(Modifier::UNDERLINED);
         }
+
         spans.push(Span::styled("●", style));
-        if idx + 1 < days.len() {
+        if i + 1 < days.len() {
             spans.push(Span::raw(" "));
         }
     }
 
-    let content = Paragraph::new(Line::from(spans))
-        .block(Block::bordered().title("Activity"))
-        .alignment(Alignment::Center);
-
-    frame.render_widget(content, area);
+    frame.render_widget(
+        Paragraph::new(Line::from(spans))
+            .block(Block::bordered().title("Activity"))
+            .alignment(Alignment::Center),
+        area,
+    );
 }
 
-fn render_graphs(frame: &mut Frame, area: Rect, graphs: &[GraphResponse]) {
+fn render_graphs(frame: &mut Frame, area: Rect, graphs: &[Graph]) {
     if graphs.is_empty() {
         frame.render_widget(
-            Paragraph::new("No graph data loaded").block(Block::bordered().title("Progress")),
+            Paragraph::new("No graph data").block(Block::bordered().title("Progress")),
             area,
         );
         return;
@@ -334,13 +135,21 @@ fn render_graphs(frame: &mut Frame, area: Rect, graphs: &[GraphResponse]) {
     }
 }
 
-fn render_graph(frame: &mut Frame, area: Rect, graph: &GraphResponse) {
+fn render_graph(frame: &mut Frame, area: Rect, graph: &Graph) {
     let data: Vec<(f64, f64)> = graph
         .points
         .iter()
         .enumerate()
         .map(|(i, p)| (i as f64, p.value))
         .collect();
+
+    if data.is_empty() {
+        frame.render_widget(
+            Paragraph::new("No data").block(Block::bordered().title(graph.exercise_name.as_str())),
+            area,
+        );
+        return;
+    }
 
     let (min_y, max_y) = data
         .iter()
@@ -349,22 +158,17 @@ fn render_graph(frame: &mut Frame, area: Rect, graph: &GraphResponse) {
             (v.min(min), v.max(max))
         });
 
-    let (min_y, max_y) = if min_y == f64::MAX {
-        (0.0, 1.0)
+    let (min_y, max_y) = if min_y == max_y {
+        (min_y - 1.0, max_y + 1.0)
     } else {
-        (min_y, max_y)
+        let pad = (max_y - min_y) * 0.1;
+        (min_y - pad, max_y + pad)
     };
 
-    let padding = ((max_y - min_y) * 0.1).max(1.0);
-    let y_bounds = [min_y - padding, max_y + padding];
-    let x_bounds = [0.0, (data.len().saturating_sub(1) as f64).max(1.0)];
+    let x_max = (data.len().saturating_sub(1) as f64).max(1.0);
 
-    let x_labels = match graph.points.len() {
-        0 => vec!["".into(), "".into(), "".into()],
-        1 => {
-            let d = graph.points[0].date.clone();
-            vec![d.clone(), d.clone(), d]
-        }
+    let x_labels: Vec<String> = match graph.points.len() {
+        0 | 1 => vec!["".into(); 3],
         len => {
             let mid = len / 2;
             vec![
@@ -388,7 +192,7 @@ fn render_graph(frame: &mut Frame, area: Rect, graph: &GraphResponse) {
     };
 
     let dataset = Dataset::default()
-        .name(graph.exercise_name.clone())
+        .name(graph.exercise_name.as_str())
         .marker(symbols::Marker::Braille)
         .graph_type(GraphType::Line)
         .style(Style::default().cyan())
@@ -399,14 +203,14 @@ fn render_graph(frame: &mut Frame, area: Rect, graph: &GraphResponse) {
         .x_axis(
             Axis::default()
                 .title("Sessions")
-                .bounds(x_bounds)
+                .bounds([0.0, x_max])
                 .labels(x_labels),
         )
         .y_axis(
             Axis::default()
                 .title("Weight")
-                .bounds(y_bounds)
-                .labels([format!("{:.0}", y_bounds[0]), format!("{:.0}", y_bounds[1])]),
+                .bounds([min_y, max_y])
+                .labels([format!("{min_y:.0}"), format!("{max_y:.0}")]),
         );
 
     frame.render_widget(chart, area);
@@ -441,35 +245,34 @@ fn render_exercise(frame: &mut Frame, area: Rect, ex: &ExerciseState, idx: usize
     frame.render_widget(block.clone(), area);
 
     let inner = block.inner(area);
+    let visible = ex.visible_len(selected);
 
-    let visible_len = ex.visible_len(selected);
-
-    let weight_cells: Vec<_> = ex
+    let weight_cells: Vec<Cell> = ex
         .sets
         .iter()
-        .take(visible_len)
+        .take(visible)
         .enumerate()
         .map(|(i, set)| {
-            let style = if selected && ex.focus == Focus::Weight && ex.set_cursor == i {
+            let style = if selected && ex.focus == Focus::Weight && ex.cursor == i {
                 Style::default().yellow().bold()
             } else {
                 Style::default()
             };
-            Cell::from(format!("{} kg", set.weight.display())).style(style)
+            Cell::from(format!("{} kg", set.weight_display())).style(style)
         })
         .collect();
 
-    let reps_cells: Vec<_> = ex
+    let reps_cells: Vec<Cell> = ex
         .sets
         .iter()
-        .take(visible_len)
+        .take(visible)
         .enumerate()
         .map(|(i, set)| {
             let mut text = set.reps_display();
-            if let Some(t) = set.completed_at_local() {
+            if let Some(t) = set.completed_local() {
                 let _ = write!(text, "\n{}", t.format("%H:%M:%S"));
             }
-            let style = if selected && ex.focus == Focus::Reps && ex.set_cursor == i {
+            let style = if selected && ex.focus == Focus::Reps && ex.cursor == i {
                 Style::default().yellow().bold()
             } else {
                 Style::default()
@@ -488,16 +291,191 @@ fn render_exercise(frame: &mut Frame, area: Rect, ex: &ExerciseState, idx: usize
     frame.render_widget(table, inner);
 }
 
-fn render_status(frame: &mut Frame, area: Rect, exercise: &str, backend: &str) {
+fn render_status(frame: &mut Frame, area: Rect, status: &str) {
+    let lines = vec![Line::from(status.to_string()), Line::from(HINTS)];
+
+    frame.render_widget(
+        Paragraph::new(lines).block(Block::bordered().title("Status")),
+        area,
+    );
+}
+
+// ============================================================================
+// Auth
+// ============================================================================
+
+fn render_auth(app: &App, frame: &mut Frame) {
+    let [header, body, footer] = Layout::vertical([
+        Constraint::Length(3),
+        Constraint::Min(12),
+        Constraint::Length(3),
+    ])
+    .areas(frame.area());
+
+    // Header with tabs
+    let title = if app.auth.register_mode {
+        "Register"
+    } else {
+        "Login"
+    };
+    let tabs = Line::from(vec![
+        Span::styled(
+            " Login ",
+            if !app.auth.register_mode {
+                Style::default().bold().green()
+            } else {
+                Style::default().dim()
+            },
+        ),
+        Span::raw(" • "),
+        Span::styled(
+            " Register ",
+            if app.auth.register_mode {
+                Style::default().bold().cyan()
+            } else {
+                Style::default().dim()
+            },
+        ),
+    ]);
+
+    let header_block = Block::bordered()
+        .title(format!("Ekman • {title}"))
+        .title_alignment(Alignment::Center);
+    let header_inner = header_block.inner(header);
+    frame.render_widget(header_block, header);
+    frame.render_widget(
+        Paragraph::new(tabs).alignment(Alignment::Center),
+        header_inner,
+    );
+
+    // Body
+    let body_cols: [Rect; 2] = Layout::horizontal([
+        Constraint::Percentage(if app.auth.register_mode { 55 } else { 70 }),
+        Constraint::Percentage(if app.auth.register_mode { 45 } else { 30 }),
+    ])
+    .areas(body);
+
+    render_auth_form(frame, body_cols[0], app);
+
+    if app.auth.register_mode {
+        render_auth_qr(frame, body_cols[1], app);
+    } else {
+        render_auth_help(frame, body_cols[1]);
+    }
+
+    // Footer
+    let footer_text = if !app.auth.status.is_empty() {
+        app.auth.status.clone()
+    } else {
+        "Ctrl+L login • Ctrl+R register • Ctrl+G new secret • Esc quits".into()
+    };
+
+    frame.render_widget(
+        Paragraph::new(footer_text)
+            .alignment(Alignment::Center)
+            .block(Block::bordered()),
+        footer,
+    );
+}
+
+fn render_auth_form(frame: &mut Frame, area: Rect, app: &App) {
+    let auth = &app.auth;
+
     let lines = vec![
-        Line::from(exercise.to_string()),
-        Line::from(backend.to_string()),
-        Line::from(HINTS),
+        field_line(
+            "Username",
+            &auth.username,
+            auth.field == AuthField::Username,
+            false,
+        ),
+        field_line(
+            "Password",
+            &auth.password,
+            auth.field == AuthField::Password,
+            true,
+        ),
+        field_line(
+            "TOTP code",
+            &auth.totp_code,
+            auth.field == AuthField::Totp,
+            false,
+        ),
     ];
 
-    let status = Paragraph::new(lines)
-        .block(Block::bordered().title("Status"))
-        .alignment(Alignment::Left);
+    let title = if auth.register_mode {
+        "Create account (2FA required)"
+    } else {
+        "Enter credentials"
+    };
 
-    frame.render_widget(status, area);
+    frame.render_widget(
+        Paragraph::new(lines).block(Block::bordered().title(title)),
+        area,
+    );
+}
+
+fn render_auth_qr(frame: &mut Frame, area: Rect, app: &App) {
+    let [qr_area, info_area] =
+        Layout::vertical([Constraint::Min(10), Constraint::Length(5)]).areas(area);
+
+    let qr_block = Block::bordered().title("Scan QR in authenticator");
+    let qr_inner = qr_block.inner(qr_area);
+    frame.render_widget(qr_block, qr_area);
+
+    match QrCode::new(app.auth.otpauth_url().as_bytes()) {
+        Ok(code) => {
+            frame.render_widget(QrCodeWidget::new(code).colors(Colors::Inverted), qr_inner);
+        }
+        Err(_) => {
+            frame.render_widget(
+                Paragraph::new("QR error").alignment(Alignment::Center),
+                qr_inner,
+            );
+        }
+    }
+
+    let info = Paragraph::new(vec![
+        Line::from("1) Scan the QR code"),
+        Line::from("2) Enter the 6-digit code"),
+        Line::from("Ctrl+G to regenerate secret"),
+    ])
+    .block(Block::bordered().title("Instructions"));
+
+    frame.render_widget(info, info_area);
+}
+
+fn render_auth_help(frame: &mut Frame, area: Rect) {
+    let help = Paragraph::new(vec![
+        Line::from("Enter username, password, and TOTP code."),
+        Line::from("Ctrl+R to register instead."),
+        Line::from("Tab to move fields, Enter to submit."),
+    ])
+    .block(Block::bordered().title("Help"));
+
+    frame.render_widget(help, area);
+}
+
+fn field_line(label: &str, value: &str, focused: bool, mask: bool) -> Line<'static> {
+    let display = if mask {
+        "•".repeat(value.chars().count())
+    } else {
+        value.to_string()
+    };
+
+    let display = if display.is_empty() {
+        "_".repeat(6)
+    } else {
+        display
+    };
+
+    let style = if focused {
+        Style::default().fg(Color::Yellow).bold()
+    } else {
+        Style::default()
+    };
+
+    Line::from(vec![
+        Span::styled(format!("{label}: "), Style::default().bold()),
+        Span::styled(display, style),
+    ])
 }

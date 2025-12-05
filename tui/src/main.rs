@@ -1,16 +1,11 @@
-//! Workout tracker TUI application.
+//! Workout tracker TUI.
 
-mod command;
-mod io;
-mod keybind;
+mod api;
 mod state;
 mod ui;
 
-use crate::command::Command;
-use crate::keybind::KeyBindings;
-use crate::state::App;
-use crossterm::event::{self, Event, KeyEventKind};
-use std::path::PathBuf;
+use crossterm::event::{self, Event, KeyCode, KeyEventKind, KeyModifiers};
+use state::{App, View};
 use std::time::{Duration, Instant};
 
 const TICK_RATE: Duration = Duration::from_millis(16);
@@ -19,45 +14,36 @@ const TICK_RATE: Duration = Duration::from_millis(16);
 async fn main() -> color_eyre::Result<()> {
     color_eyre::install()?;
 
-    let cookie_path = cookie_path();
-    let (client, jar) = io::build_client_with_store(&cookie_path)?;
-
-    let bindings = KeyBindings::load(&config_path());
-    let (io_tx, io_rx) = io::spawn(client);
-    let mut app = App::new(io_tx, io_rx, jar, cookie_path);
+    let mut app = App::new()?;
     app.try_resume_session();
 
     let mut terminal = ratatui::init();
-    let result = run(&mut app, &mut terminal, &bindings);
+    let result = run(&mut app, &mut terminal);
     ratatui::restore();
 
     result
 }
 
-fn run(
-    app: &mut App,
-    terminal: &mut ratatui::DefaultTerminal,
-    bindings: &KeyBindings,
-) -> color_eyre::Result<()> {
+fn run(app: &mut App, terminal: &mut ratatui::DefaultTerminal) -> color_eyre::Result<()> {
     let mut last_tick = Instant::now();
 
     while app.running {
         app.poll_io();
         app.tick();
 
-        terminal.draw(|frame| ui::render(app, frame))?;
+        terminal.draw(|f| ui::render(app, f))?;
 
         let timeout = TICK_RATE.saturating_sub(last_tick.elapsed());
         if event::poll(timeout)?
             && let Event::Key(key) = event::read()?
-            && key.kind == KeyEventKind::Press
         {
-            if app.is_authenticated() {
-                if let Some(cmd) = bindings.get(key) {
-                    execute(app, cmd);
-                }
-            } else {
-                app.handle_auth_key(key);
+            if key.kind != KeyEventKind::Press {
+                continue;
+            }
+
+            match app.view {
+                View::Auth => handle_auth_key(app, key.code, key.modifiers),
+                View::Dashboard => handle_dashboard_key(app, key.code, key.modifiers),
             }
         }
 
@@ -69,84 +55,69 @@ fn run(
     Ok(())
 }
 
-fn execute(app: &mut App, cmd: Command) {
-    match cmd {
-        Command::Quit => app.running = false,
-        Command::NextExercise => app.select_exercise(1),
-        Command::PrevExercise => app.select_exercise(-1),
-        Command::NextDay => app.move_day(1),
-        Command::PrevDay => app.move_day(-1),
-        Command::Today => app.jump_to_today(),
-        Command::NextField => {
-            if let Some(ex) = app.current_exercise_mut() {
-                ex.toggle_focus();
-            }
-            app.refresh_status();
-        }
-        Command::PrevField => {
-            if let Some(ex) = app.current_exercise_mut() {
-                ex.toggle_focus();
-            }
-            app.refresh_status();
-        }
-        Command::MoveLeft => {
-            if let Some(ex) = app.current_exercise_mut() {
-                ex.move_set_cursor(-1);
-            }
-            app.refresh_status();
-        }
-        Command::MoveRight => {
-            if let Some(ex) = app.current_exercise_mut() {
-                ex.move_set_cursor(1);
-            }
-            app.refresh_status();
-        }
-        Command::NextSet => app.tab_next(),
-        Command::PrevSet => app.tab_prev(),
-        Command::BumpWeightUp => {
-            if let Some(set_idx) = app.current_exercise_mut().map(|ex| {
-                let set_idx = ex.set_cursor;
-                ex.bump_weight(2.5);
-                set_idx
-            }) {
-                app.sync_set(app.selected, set_idx);
-            }
-            app.refresh_status();
-        }
-        Command::BumpWeightDown => {
-            if let Some(set_idx) = app.current_exercise_mut().map(|ex| {
-                let set_idx = ex.set_cursor;
-                ex.bump_weight(-2.5);
-                set_idx
-            }) {
-                app.sync_set(app.selected, set_idx);
-            }
-            app.refresh_status();
-        }
-        Command::DeleteSet => {
-            app.delete_current_set();
-            app.refresh_status();
-        }
-        Command::Digit(ch) => app.input_digit(ch),
-        Command::Backspace => app.backspace(),
+fn handle_auth_key(app: &mut App, code: KeyCode, mods: KeyModifiers) {
+    use KeyCode::*;
+
+    match code {
+        Esc => app.running = false,
+        Tab => app.auth.next_field(),
+        BackTab => app.auth.prev_field(),
+        Enter => app.submit_auth(),
+        Backspace => app.auth.backspace(),
+        Char('l') if mods.contains(KeyModifiers::CONTROL) => app.set_auth_mode(false),
+        Char('r') if mods.contains(KeyModifiers::CONTROL) => app.set_auth_mode(true),
+        Char('g') if mods.contains(KeyModifiers::CONTROL) => app.auth.regenerate_secret(),
+        Char(ch) => app.auth.push_char(ch),
+        _ => {}
     }
 }
 
-fn config_path() -> PathBuf {
-    config_dir()
-        .map(|d| d.join("binds.conf"))
-        .unwrap_or_else(|| "binds.conf".into())
-}
+fn handle_dashboard_key(app: &mut App, code: KeyCode, mods: KeyModifiers) {
+    use KeyCode::*;
 
-fn config_dir() -> Option<PathBuf> {
-    std::env::var_os("XDG_CONFIG_HOME")
-        .map(PathBuf::from)
-        .or_else(|| std::env::var_os("HOME").map(|h| PathBuf::from(h).join(".config")))
-        .map(|p| p.join("ekman"))
-}
+    // Quit
+    if code == Esc
+        || code == Char('q')
+        || (code == Char('c') && mods.contains(KeyModifiers::CONTROL))
+    {
+        app.running = false;
+        return;
+    }
 
-fn cookie_path() -> PathBuf {
-    config_dir()
-        .map(|d| d.join("session.cookie"))
-        .unwrap_or_else(|| PathBuf::from("session.cookie"))
+    match code {
+        // Day navigation
+        Char('a') => app.move_day(-1),
+        Char('s') => app.move_day(1),
+        Char('r') => app.jump_to_today(),
+
+        // Exercise navigation
+        Char('n') => app.select_exercise(1),
+        Char('e') => app.select_exercise(-1),
+
+        // Field focus
+        Up | Down => app.toggle_focus(),
+
+        // Set cursor
+        Left => app.move_set_cursor(-1),
+        Right => app.move_set_cursor(1),
+
+        // Tab navigation
+        Tab => app.tab_next(),
+        BackTab => app.tab_prev(),
+
+        // Weight bumps
+        Char('w') => app.bump_weight(2.5),
+        Char('f') => app.bump_weight(-2.5),
+
+        // Delete set
+        Char('d') => app.delete_current_set(),
+
+        // Digit input
+        Char(ch) if ch.is_ascii_digit() || ch == '.' => app.input_char(ch),
+
+        // Backspace
+        Backspace => app.backspace(),
+
+        _ => {}
+    }
 }

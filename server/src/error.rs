@@ -4,62 +4,71 @@ use axum::{
     response::{IntoResponse, Response},
 };
 use serde::Serialize;
-use thiserror::Error;
 
-pub type AppResult<T> = Result<T, AppError>;
+pub type Result<T> = std::result::Result<T, Error>;
 
-#[derive(Debug, Error)]
-pub enum AppError {
-    #[error("unauthorized")]
+#[derive(Debug)]
+pub enum Error {
     Unauthorized,
-    #[error("not found: {0}")]
     NotFound(String),
-    #[error("bad request: {0}")]
     BadRequest(String),
-    #[error("database error: {0}")]
-    Database(String),
-    #[error("internal error: {0}")]
     Internal(String),
 }
+
+impl std::fmt::Display for Error {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Unauthorized => write!(f, "unauthorized"),
+            Self::NotFound(msg) => write!(f, "not found: {msg}"),
+            Self::BadRequest(msg) => write!(f, "bad request: {msg}"),
+            Self::Internal(msg) => write!(f, "internal error: {msg}"),
+        }
+    }
+}
+
+impl std::error::Error for Error {}
 
 #[derive(Serialize)]
 struct ErrorBody {
     error: String,
 }
 
-impl IntoResponse for AppError {
+impl IntoResponse for Error {
     fn into_response(self) -> Response {
-        let status = match self {
-            AppError::BadRequest(_) => StatusCode::BAD_REQUEST,
-            AppError::NotFound(_) => StatusCode::NOT_FOUND,
-            AppError::Unauthorized => StatusCode::UNAUTHORIZED,
-            AppError::Database(_) | AppError::Internal(_) => StatusCode::INTERNAL_SERVER_ERROR,
+        let status = match &self {
+            Error::Unauthorized => StatusCode::UNAUTHORIZED,
+            Error::NotFound(_) => StatusCode::NOT_FOUND,
+            Error::BadRequest(_) => StatusCode::BAD_REQUEST,
+            Error::Internal(_) => StatusCode::INTERNAL_SERVER_ERROR,
         };
+
         if status.is_server_error() {
-            tracing::error!(status = %status, error = %self);
+            tracing::error!(%status, error = %self);
         } else {
-            tracing::warn!(status = %status, error = %self);
+            tracing::warn!(%status, error = %self);
         }
 
-        let body = Json(ErrorBody {
-            error: self.to_string(),
-        });
-
-        (status, body).into_response()
+        (
+            status,
+            Json(ErrorBody {
+                error: self.to_string(),
+            }),
+        )
+            .into_response()
     }
 }
 
-impl From<turso::Error> for AppError {
-    fn from(value: turso::Error) -> Self {
-        match value {
-            turso::Error::QueryReturnedNoRows => AppError::NotFound("record not found".to_string()),
-            other => AppError::Database(other.to_string()),
+impl From<turso::Error> for Error {
+    fn from(e: turso::Error) -> Self {
+        match e {
+            turso::Error::QueryReturnedNoRows => Error::NotFound("not found".into()),
+            other => Error::Internal(other.to_string()),
         }
     }
 }
 
-impl From<std::io::Error> for AppError {
-    fn from(err: std::io::Error) -> Self {
-        AppError::Internal(err.to_string())
+impl From<std::io::Error> for Error {
+    fn from(e: std::io::Error) -> Self {
+        Error::Internal(e.to_string())
     }
 }
