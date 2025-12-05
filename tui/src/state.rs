@@ -21,6 +21,7 @@ pub enum View {
     Auth,
     Workout,
     Manage,
+    Exercises,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -42,6 +43,13 @@ pub enum ManageMode {
     AddExercise,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ExerciseEditMode {
+    Browse,
+    Add,
+    Rename,
+}
+
 pub struct App {
     pub running: bool,
     pub view: View,
@@ -53,6 +61,7 @@ pub struct App {
     pub selected: usize,
     pub status: String,
     pub manage: ManageState,
+    pub exercise_edit: ExerciseEditState,
     api: ApiClient,
     plans: Vec<Template>,
     all_exercises: Vec<Exercise>,
@@ -142,6 +151,56 @@ impl ManageState {
     }
 }
 
+pub struct ExerciseEditState {
+    pub mode: ExerciseEditMode,
+    pub selected: usize,
+    pub show_archived: bool,
+    pub input: String,
+    pub filtered: Vec<Exercise>,
+}
+
+impl ExerciseEditState {
+    pub fn new() -> Self {
+        Self {
+            mode: ExerciseEditMode::Browse,
+            selected: 0,
+            show_archived: false,
+            input: String::new(),
+            filtered: Vec::new(),
+        }
+    }
+
+    pub fn update_filtered(&mut self, exercises: &[Exercise]) {
+        self.filtered = exercises
+            .iter()
+            .filter(|e| self.show_archived || !e.archived)
+            .cloned()
+            .collect();
+        self.selected = self.selected.min(self.filtered.len().saturating_sub(1));
+    }
+
+    pub fn start_add(&mut self) {
+        self.mode = ExerciseEditMode::Add;
+        self.input.clear();
+    }
+
+    pub fn start_rename(&mut self) {
+        if let Some(ex) = self.filtered.get(self.selected) {
+            self.mode = ExerciseEditMode::Rename;
+            self.input = ex.name.clone();
+        }
+    }
+
+    pub fn cancel(&mut self) {
+        self.mode = ExerciseEditMode::Browse;
+        self.input.clear();
+    }
+
+    pub fn selected_exercise(&self) -> Option<&Exercise> {
+        self.filtered.get(self.selected)
+    }
+}
+
 impl App {
     pub fn new() -> color_eyre::Result<Self> {
         let cookie_path = config_dir().join("session.cookie");
@@ -158,6 +217,7 @@ impl App {
             selected: 0,
             status: String::new(),
             manage: ManageState::new(),
+            exercise_edit: ExerciseEditState::new(),
             api,
             plans: Vec::new(),
             all_exercises: Vec::new(),
@@ -184,11 +244,11 @@ impl App {
         // Auto-advance after timeout
         if let Some(ex) = self.exercises.get_mut(self.selected)
             && ex.focus == Focus::Reps
-                && ex.should_auto_advance()
-                && ex.sets.get(ex.cursor).and_then(|s| s.reps).is_some()
-            {
-                self.advance_set();
-            }
+            && ex.should_auto_advance()
+            && ex.sets.get(ex.cursor).and_then(|s| s.reps).is_some()
+        {
+            self.advance_set();
+        }
     }
 
     fn handle_response(&mut self, resp: Response) {
@@ -312,6 +372,9 @@ impl App {
                     if self.manage.mode == ManageMode::AddExercise {
                         self.manage.update_search(&self.all_exercises);
                     }
+                    if self.view == View::Exercises {
+                        self.exercise_edit.update_filtered(&self.all_exercises);
+                    }
                 }
                 Err(e) => self.status = format!("Load exercises error: {e}"),
             },
@@ -322,6 +385,28 @@ impl App {
                     self.api.send(Request::LoadPlans);
                 }
                 Err(e) => self.status = format!("Update plan error: {e}"),
+            },
+
+            Response::ExerciseCreated(result) => match result {
+                Ok(exercise) => {
+                    self.status = format!("Created exercise: {}", exercise.name);
+                    self.all_exercises.push(exercise);
+                    self.exercise_edit.update_filtered(&self.all_exercises);
+                    self.exercise_edit.cancel();
+                }
+                Err(e) => self.status = format!("Create exercise error: {e}"),
+            },
+
+            Response::ExerciseUpdated(result) => match result {
+                Ok(exercise) => {
+                    self.status = format!("Updated exercise: {}", exercise.name);
+                    if let Some(ex) = self.all_exercises.iter_mut().find(|e| e.id == exercise.id) {
+                        *ex = exercise;
+                    }
+                    self.exercise_edit.update_filtered(&self.all_exercises);
+                    self.exercise_edit.cancel();
+                }
+                Err(e) => self.status = format!("Update exercise error: {e}"),
             },
         }
     }
@@ -777,12 +862,122 @@ impl App {
     pub fn switch_to_workout(&mut self) {
         self.view = View::Workout;
         self.manage.cancel_add();
+        self.exercise_edit.cancel();
     }
 
     pub fn switch_to_manage(&mut self) {
         self.view = View::Manage;
         self.manage.mode = ManageMode::Browse;
+        self.exercise_edit.cancel();
         self.api.send(Request::LoadExercises);
+    }
+
+    pub fn switch_to_exercises(&mut self) {
+        self.view = View::Exercises;
+        self.manage.cancel_add();
+        self.exercise_edit.mode = ExerciseEditMode::Browse;
+        self.exercise_edit.update_filtered(&self.all_exercises);
+        self.api.send(Request::LoadExercises);
+    }
+
+    // Exercise edit methods
+
+    pub fn exercise_select(&mut self, delta: i32) {
+        if self.exercise_edit.mode != ExerciseEditMode::Browse {
+            return;
+        }
+        let len = self.exercise_edit.filtered.len() as i32;
+        if len == 0 {
+            return;
+        }
+        let next = (self.exercise_edit.selected as i32 + delta).clamp(0, len - 1);
+        self.exercise_edit.selected = next as usize;
+    }
+
+    pub fn exercise_toggle_archived(&mut self) {
+        if self.exercise_edit.mode != ExerciseEditMode::Browse {
+            return;
+        }
+        self.exercise_edit.show_archived = !self.exercise_edit.show_archived;
+        self.exercise_edit.update_filtered(&self.all_exercises);
+        self.status = if self.exercise_edit.show_archived {
+            "Showing archived exercises".into()
+        } else {
+            "Hiding archived exercises".into()
+        };
+    }
+
+    pub fn exercise_start_add(&mut self) {
+        self.exercise_edit.start_add();
+    }
+
+    pub fn exercise_start_rename(&mut self) {
+        self.exercise_edit.start_rename();
+    }
+
+    pub fn exercise_cancel(&mut self) {
+        self.exercise_edit.cancel();
+    }
+
+    pub fn exercise_input(&mut self, ch: char) {
+        if self.exercise_edit.mode == ExerciseEditMode::Browse {
+            return;
+        }
+        self.exercise_edit.input.push(ch);
+    }
+
+    pub fn exercise_backspace(&mut self) {
+        if self.exercise_edit.mode == ExerciseEditMode::Browse {
+            return;
+        }
+        self.exercise_edit.input.pop();
+    }
+
+    pub fn exercise_confirm(&mut self) {
+        let name = self.exercise_edit.input.trim().to_string();
+        if name.is_empty() {
+            self.status = "Name cannot be empty".into();
+            return;
+        }
+
+        match self.exercise_edit.mode {
+            ExerciseEditMode::Add => {
+                self.api
+                    .send(Request::CreateExercise { name: name.clone() });
+                self.status = format!("Creating exercise: {}...", name);
+            }
+            ExerciseEditMode::Rename => {
+                if let Some(ex) = self.exercise_edit.selected_exercise() {
+                    self.api.send(Request::UpdateExercise {
+                        id: ex.id,
+                        name: Some(name.clone()),
+                        archived: None,
+                    });
+                    self.status = format!("Renaming to: {}...", name);
+                }
+            }
+            ExerciseEditMode::Browse => {}
+        }
+    }
+
+    pub fn exercise_archive(&mut self) {
+        if self.exercise_edit.mode != ExerciseEditMode::Browse {
+            return;
+        }
+        if let Some(ex) = self.exercise_edit.selected_exercise() {
+            let new_archived = !ex.archived;
+            let action = if new_archived {
+                "Archiving"
+            } else {
+                "Unarchiving"
+            };
+            self.api.send(Request::UpdateExercise {
+                id: ex.id,
+                name: None,
+                archived: Some(new_archived),
+            });
+            self.status = format!("{} exercise: {}...", action, ex.name);
+        }
     }
 
     // Management methods
@@ -895,10 +1090,6 @@ impl App {
         self.plans
             .iter()
             .find(|p| p.day_of_week == Some(weekday as i32))
-    }
-
-    pub fn plans(&self) -> &[Template] {
-        &self.plans
     }
 }
 
@@ -1015,10 +1206,9 @@ impl ExerciseState {
         }
 
         let should_reset = self.last_input.is_none_or(|t| t.elapsed() > INPUT_TIMEOUT);
-        if should_reset
-            && let Some(set) = self.sets.get_mut(self.cursor) {
-                set.weight.clear();
-            }
+        if should_reset && let Some(set) = self.sets.get_mut(self.cursor) {
+            set.weight.clear();
+        }
 
         if let Some(set) = self.sets.get_mut(self.cursor) {
             set.weight.push(ch);

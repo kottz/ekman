@@ -5,7 +5,7 @@ mod state;
 mod ui;
 
 use crossterm::event::{self, Event, KeyCode, KeyEventKind, KeyModifiers};
-use state::{App, ManageMode, View};
+use state::{App, ExerciseEditMode, ManageMode, View};
 use std::time::{Duration, Instant};
 
 const TICK_RATE: Duration = Duration::from_millis(16);
@@ -35,17 +35,19 @@ fn run(app: &mut App, terminal: &mut ratatui::DefaultTerminal) -> color_eyre::Re
 
         let timeout = TICK_RATE.saturating_sub(last_tick.elapsed());
         if event::poll(timeout)?
-            && let Event::Key(key) = event::read()? {
-                if key.kind != KeyEventKind::Press {
-                    continue;
-                }
-
-                match app.view {
-                    View::Auth => handle_auth_key(app, key.code, key.modifiers),
-                    View::Workout => handle_workout_key(app, key.code, key.modifiers),
-                    View::Manage => handle_manage_key(app, key.code, key.modifiers),
-                }
+            && let Event::Key(key) = event::read()?
+        {
+            if key.kind != KeyEventKind::Press {
+                continue;
             }
+
+            match app.view {
+                View::Auth => handle_auth_key(app, key.code, key.modifiers),
+                View::Workout => handle_workout_key(app, key.code, key.modifiers),
+                View::Manage => handle_manage_key(app, key.code, key.modifiers),
+                View::Exercises => handle_exercises_key(app, key.code, key.modifiers),
+            }
+        }
 
         if last_tick.elapsed() >= TICK_RATE {
             last_tick = Instant::now();
@@ -87,6 +89,10 @@ fn handle_workout_key(app: &mut App, code: KeyCode, mods: KeyModifiers) {
     // View switching
     if code == F(2) {
         app.switch_to_manage();
+        return;
+    }
+    if code == F(3) {
+        app.switch_to_exercises();
         return;
     }
 
@@ -146,6 +152,11 @@ fn handle_manage_key(app: &mut App, code: KeyCode, mods: KeyModifiers) {
         return;
     }
 
+    if code == F(3) {
+        app.switch_to_exercises();
+        return;
+    }
+
     if code == Char('q') && app.manage.mode == ManageMode::Browse {
         app.running = false;
         return;
@@ -189,6 +200,76 @@ fn handle_manage_key(app: &mut App, code: KeyCode, mods: KeyModifiers) {
 
             // Type search query
             Char(ch) if !ch.is_control() => app.manage_search_input(ch),
+
+            _ => {}
+        },
+    }
+}
+
+fn handle_exercises_key(app: &mut App, code: KeyCode, mods: KeyModifiers) {
+    use KeyCode::*;
+
+    // Global keys
+    if code == Esc {
+        if app.exercise_edit.mode != ExerciseEditMode::Browse {
+            app.exercise_cancel();
+        } else {
+            app.running = false;
+        }
+        return;
+    }
+
+    if code == F(1) {
+        app.switch_to_workout();
+        return;
+    }
+
+    if code == F(2) {
+        app.switch_to_manage();
+        return;
+    }
+
+    if code == Char('q') && app.exercise_edit.mode == ExerciseEditMode::Browse {
+        app.running = false;
+        return;
+    }
+
+    if code == Char('c') && mods.contains(KeyModifiers::CONTROL) {
+        app.running = false;
+        return;
+    }
+
+    match app.exercise_edit.mode {
+        ExerciseEditMode::Browse => match code {
+            // Navigate exercises
+            Down | Char('n') => app.exercise_select(1),
+            Up | Char('e') => app.exercise_select(-1),
+
+            // Add new exercise
+            Char('a') => app.exercise_start_add(),
+
+            // Rename selected exercise
+            Char('r') => app.exercise_start_rename(),
+
+            // Archive/unarchive selected exercise
+            Char('x') => app.exercise_archive(),
+
+            // Toggle showing archived
+            Char('h') => app.exercise_toggle_archived(),
+
+            _ => {}
+        },
+
+        ExerciseEditMode::Add | ExerciseEditMode::Rename => match code {
+            // Confirm
+            Enter => app.exercise_confirm(),
+
+            // Cancel
+            Backspace if app.exercise_edit.input.is_empty() => app.exercise_cancel(),
+            Backspace => app.exercise_backspace(),
+
+            // Type name
+            Char(ch) if !ch.is_control() => app.exercise_input(ch),
 
             _ => {}
         },

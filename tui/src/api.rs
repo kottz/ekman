@@ -56,6 +56,14 @@ pub enum Request {
         template_id: i64,
         exercise_id: i64,
     },
+    CreateExercise {
+        name: String,
+    },
+    UpdateExercise {
+        id: i64,
+        name: Option<String>,
+        archived: Option<bool>,
+    },
 }
 
 /// Responses from the background task.
@@ -86,6 +94,8 @@ pub enum Response {
         result: Result<(), String>,
     },
     PlanUpdated(Result<(), String>),
+    ExerciseCreated(Result<Exercise, String>),
+    ExerciseUpdated(Result<Exercise, String>),
 }
 
 pub struct ApiClient {
@@ -103,9 +113,10 @@ impl ApiClient {
         // Load existing cookie
         if cookie_path.exists()
             && let Ok(data) = fs::read_to_string(&cookie_path)
-                && !data.trim().is_empty() {
-                    jar.add_cookie_str(data.trim(), &url);
-                }
+            && !data.trim().is_empty()
+        {
+            jar.add_cookie_str(data.trim(), &url);
+        }
 
         let client = Client::builder()
             .cookie_provider(Arc::clone(&jar))
@@ -136,13 +147,14 @@ impl ApiClient {
 
         if let Some(header) = self.jar.cookies(&url)
             && let Ok(value) = header.to_str()
-                && !value.is_empty() {
-                    let persisted = format!("{value}; Path=/");
-                    if let Some(parent) = self.cookie_path.parent() {
-                        let _ = fs::create_dir_all(parent);
-                    }
-                    let _ = fs::write(&self.cookie_path, persisted);
-                }
+            && !value.is_empty()
+        {
+            let persisted = format!("{value}; Path=/");
+            if let Some(parent) = self.cookie_path.parent() {
+                let _ = fs::create_dir_all(parent);
+            }
+            let _ = fs::write(&self.cookie_path, persisted);
+        }
     }
 }
 
@@ -379,6 +391,42 @@ async fn handle_request(client: &Client, req: Request) -> Response {
                 .and_then(|r| r.error_for_status());
 
             Response::PlanUpdated(result.map(|_| ()).map_err(|e| e.to_string()))
+        }
+
+        Request::CreateExercise { name } => {
+            let result = client
+                .post(format!("{BASE_URL}/api/exercises"))
+                .json(&serde_json::json!({ "name": name }))
+                .send()
+                .await
+                .and_then(|r| r.error_for_status());
+
+            match result {
+                Ok(r) => Response::ExerciseCreated(r.json().await.map_err(|e| e.to_string())),
+                Err(e) => Response::ExerciseCreated(Err(e.to_string())),
+            }
+        }
+
+        Request::UpdateExercise { id, name, archived } => {
+            let mut body = serde_json::Map::new();
+            if let Some(n) = name {
+                body.insert("name".into(), serde_json::Value::String(n));
+            }
+            if let Some(a) = archived {
+                body.insert("archived".into(), serde_json::Value::Bool(a));
+            }
+
+            let result = client
+                .patch(format!("{BASE_URL}/api/exercises/{id}"))
+                .json(&body)
+                .send()
+                .await
+                .and_then(|r| r.error_for_status());
+
+            match result {
+                Ok(r) => Response::ExerciseUpdated(r.json().await.map_err(|e| e.to_string())),
+                Err(e) => Response::ExerciseUpdated(Err(e.to_string())),
+            }
         }
     }
 }

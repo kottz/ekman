@@ -559,9 +559,10 @@ async fn exercise_graph(
     let metric = query.metric.unwrap_or(Metric::MaxWeight);
 
     if let (Some(start), Some(end)) = (query.start, query.end)
-        && start > end {
-            return Err(Error::BadRequest("start must be before end".into()));
-        }
+        && start > end
+    {
+        return Err(Error::BadRequest("start must be before end".into()));
+    }
 
     let mut conn = state.db.connect()?;
     let user = auth::user_from_headers(&mut conn, &headers).await?;

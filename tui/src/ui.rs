@@ -1,6 +1,6 @@
 //! UI rendering.
 
-use crate::state::{App, AuthField, ExerciseState, Focus, ManageMode, View};
+use crate::state::{App, AuthField, ExerciseEditMode, ExerciseState, Focus, ManageMode, View};
 use chrono::Utc;
 use ekman_core::{ActivityDay, Graph};
 use qrcode::QrCode;
@@ -17,9 +17,12 @@ use ratatui::{
 use std::fmt::Write;
 use tui_qrcode::{Colors, QrCodeWidget};
 
-const WORKOUT_HINTS: &str = "←/→: set • Tab: navigate • ↑/↓: weight/reps • W/F: ±2.5kg • N/E: exercise • A/S: day • R: today • D: delete • F2: manage • q: quit";
-const MANAGE_HINTS: &str = "N/E: day • ↑/↓: exercise • A: add • D: remove • F1: workout • q: quit";
+const WORKOUT_HINTS: &str = "←/→: set • Tab: navigate • ↑/↓: weight/reps • W/F: ±2.5kg • N/E: exercise • A/S: day • R: today • D: delete • F2: plans • F3: exercises • q: quit";
+const MANAGE_HINTS: &str =
+    "N/E: day • ↑/↓: exercise • A: add • D: remove • F1: workout • F3: exercises • q: quit";
 const MANAGE_ADD_HINTS: &str = "Type to search • ↑/↓: select • Enter: confirm • Esc: cancel";
+const EXERCISES_HINTS: &str = "↑/↓: select • A: add • R: rename • X: archive • H: show archived • F1: workout • F2: plans • q: quit";
+const EXERCISES_EDIT_HINTS: &str = "Type name • Enter: confirm • Esc: cancel";
 
 const WEEKDAYS: [&str; 7] = [
     "Monday",
@@ -36,6 +39,7 @@ pub fn render(app: &App, frame: &mut Frame) {
         View::Auth => render_auth(app, frame),
         View::Workout => render_workout(app, frame),
         View::Manage => render_manage(app, frame),
+        View::Exercises => render_exercises_view(app, frame),
     }
 }
 
@@ -446,6 +450,169 @@ fn render_exercise_search(frame: &mut Frame, area: Rect, app: &App) {
     let results_title = format!("Results ({})", app.manage.search_results.len());
     let results = List::new(items).block(Block::bordered().title(results_title));
     frame.render_widget(results, results_area);
+}
+
+// ============================================================================
+// Exercises View
+// ============================================================================
+
+fn render_exercises_view(app: &App, frame: &mut Frame) {
+    let [main, status] =
+        Layout::vertical([Constraint::Min(0), Constraint::Length(4)]).areas(frame.area());
+
+    let hints = match app.exercise_edit.mode {
+        ExerciseEditMode::Browse => EXERCISES_HINTS,
+        ExerciseEditMode::Add | ExerciseEditMode::Rename => EXERCISES_EDIT_HINTS,
+    };
+
+    render_exercises_main(frame, main, app);
+    render_status(frame, status, &app.status, hints);
+}
+
+fn render_exercises_main(frame: &mut Frame, area: Rect, app: &App) {
+    let [list_area, detail_area] =
+        Layout::horizontal([Constraint::Percentage(50), Constraint::Percentage(50)]).areas(area);
+
+    render_exercise_list(frame, list_area, app);
+    render_exercise_detail(frame, detail_area, app);
+}
+
+fn render_exercise_list(frame: &mut Frame, area: Rect, app: &App) {
+    let archived_indicator = if app.exercise_edit.show_archived {
+        " (showing archived)"
+    } else {
+        ""
+    };
+
+    let title = format!(
+        "Exercises ({}){}",
+        app.exercise_edit.filtered.len(),
+        archived_indicator
+    );
+
+    let items: Vec<ListItem> = app
+        .exercise_edit
+        .filtered
+        .iter()
+        .enumerate()
+        .map(|(i, ex)| {
+            let mut style = if i == app.exercise_edit.selected {
+                Style::default().yellow().bold()
+            } else {
+                Style::default()
+            };
+
+            let name = if ex.archived {
+                style = style.dim();
+                format!("{} [archived]", ex.name)
+            } else {
+                ex.name.clone()
+            };
+
+            ListItem::new(name).style(style)
+        })
+        .collect();
+
+    let list = List::new(items).block(Block::bordered().title(title));
+    frame.render_widget(list, area);
+}
+
+fn render_exercise_detail(frame: &mut Frame, area: Rect, app: &App) {
+    match app.exercise_edit.mode {
+        ExerciseEditMode::Browse => render_exercise_info(frame, area, app),
+        ExerciseEditMode::Add => {
+            render_exercise_input(frame, area, "Add New Exercise", &app.exercise_edit.input)
+        }
+        ExerciseEditMode::Rename => {
+            render_exercise_input(frame, area, "Rename Exercise", &app.exercise_edit.input)
+        }
+    }
+}
+
+fn render_exercise_info(frame: &mut Frame, area: Rect, app: &App) {
+    let content = if let Some(ex) = app.exercise_edit.selected_exercise() {
+        let status = if ex.archived { "Archived" } else { "Active" };
+        let owner = match &ex.owner {
+            ekman_core::Owner::User => "You",
+            ekman_core::Owner::Admin => "System",
+        };
+
+        vec![
+            Line::from(vec![
+                Span::raw("Name: "),
+                Span::styled(&ex.name, Style::default().bold()),
+            ]),
+            Line::from(""),
+            Line::from(vec![
+                Span::raw("Status: "),
+                Span::styled(
+                    status,
+                    if ex.archived {
+                        Style::default().dim()
+                    } else {
+                        Style::default().green()
+                    },
+                ),
+            ]),
+            Line::from(vec![Span::raw("Owner: "), Span::raw(owner)]),
+            Line::from(""),
+            Line::from(""),
+            Line::from(vec![
+                Span::styled("R", Style::default().cyan().bold()),
+                Span::raw(" to rename • "),
+                Span::styled("X", Style::default().cyan().bold()),
+                Span::raw(if ex.archived {
+                    " to unarchive"
+                } else {
+                    " to archive"
+                }),
+            ]),
+        ]
+    } else {
+        vec![
+            Line::from("No exercise selected"),
+            Line::from(""),
+            Line::from(vec![
+                Span::styled("A", Style::default().cyan().bold()),
+                Span::raw(" to add a new exercise"),
+            ]),
+        ]
+    };
+
+    let block = Block::bordered().title("Exercise Details");
+    let paragraph = Paragraph::new(content).block(block);
+    frame.render_widget(paragraph, area);
+}
+
+fn render_exercise_input(frame: &mut Frame, area: Rect, title: &str, input: &str) {
+    let display_text = if input.is_empty() {
+        "Type exercise name...".to_string()
+    } else {
+        format!("{}▌", input)
+    };
+
+    let style = if input.is_empty() {
+        Style::default().dim()
+    } else {
+        Style::default().yellow()
+    };
+
+    let content = vec![
+        Line::from(""),
+        Line::from(Span::styled(display_text, style)),
+        Line::from(""),
+        Line::from(""),
+        Line::from(vec![
+            Span::styled("Enter", Style::default().green().bold()),
+            Span::raw(" to confirm • "),
+            Span::styled("Esc", Style::default().red().bold()),
+            Span::raw(" to cancel"),
+        ]),
+    ];
+
+    let block = Block::bordered().title(title);
+    let paragraph = Paragraph::new(content).block(block);
+    frame.render_widget(paragraph, area);
 }
 
 // ============================================================================
