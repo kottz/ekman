@@ -107,6 +107,7 @@ pub struct ManageState {
     pub search_query: String,
     pub search_results: Vec<Exercise>,
     pub search_cursor: usize,
+    pub pending_exercise_id: Option<i64>,
 }
 
 impl ManageState {
@@ -118,6 +119,7 @@ impl ManageState {
             search_query: String::new(),
             search_results: Vec::new(),
             search_cursor: 0,
+            pending_exercise_id: None,
         }
     }
 
@@ -377,6 +379,24 @@ impl App {
                     }
                 }
                 Err(e) => self.status = format!("Load exercises error: {e}"),
+            },
+
+            Response::PlanCreated(result) => match result {
+                Ok(plan) => {
+                    self.status = format!("Created plan: {}", plan.name);
+                    // If we have a pending exercise to add, add it now
+                    if let Some(exercise_id) = self.manage.pending_exercise_id.take() {
+                        self.api.send(Request::AddExerciseToPlan {
+                            template_id: plan.id,
+                            exercise_id,
+                        });
+                    }
+                    self.api.send(Request::LoadPlans);
+                }
+                Err(e) => {
+                    self.manage.pending_exercise_id = None;
+                    self.status = format!("Create plan error: {e}");
+                }
             },
 
             Response::PlanUpdated(result) => match result {
@@ -869,6 +889,7 @@ impl App {
         self.view = View::Manage;
         self.manage.mode = ManageMode::Browse;
         self.exercise_edit.cancel();
+        self.api.send(Request::LoadPlans);
         self.api.send(Request::LoadExercises);
     }
 
@@ -1053,19 +1074,54 @@ impl App {
             .get(self.manage.search_cursor)
             .cloned()
         else {
-            return;
-        };
-        let Some(plan) = self.plan_for_weekday(self.manage.selected_day) else {
-            self.status = "No plan for this day".into();
+            self.status = "No exercise selected".into();
             return;
         };
 
-        self.api.send(Request::AddExerciseToPlan {
-            template_id: plan.id,
-            exercise_id: exercise.id,
-        });
-        self.manage.cancel_add();
-        self.status = format!("Adding {} to plan...", exercise.name);
+        // Try to find an existing plan for this weekday
+        let weekday = self.manage.selected_day;
+        let plan = self
+            .plans
+            .iter()
+            .find(|p| p.day_of_week == Some(weekday as i32));
+
+        if let Some(plan) = plan {
+            // Plan exists, add exercise directly
+            let template_id = plan.id;
+            let plan_name = plan.name.clone();
+
+            self.api.send(Request::AddExerciseToPlan {
+                template_id,
+                exercise_id: exercise.id,
+            });
+            self.manage.cancel_add();
+            self.status = format!("Adding {} to {}...", exercise.name, plan_name);
+        } else {
+            // No plan for this day, create one first
+            let day_names = [
+                "Monday",
+                "Tuesday",
+                "Wednesday",
+                "Thursday",
+                "Friday",
+                "Saturday",
+                "Sunday",
+            ];
+            let plan_name = day_names[weekday].to_string();
+
+            // Store the exercise to add after plan creation
+            self.manage.pending_exercise_id = Some(exercise.id);
+
+            self.api.send(Request::CreatePlan {
+                name: plan_name.clone(),
+                day_of_week: weekday as i32,
+            });
+            self.manage.cancel_add();
+            self.status = format!(
+                "Creating {} plan and adding {}...",
+                plan_name, exercise.name
+            );
+        }
     }
 
     pub fn manage_delete_exercise(&mut self) {

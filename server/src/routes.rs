@@ -32,6 +32,7 @@ pub fn api() -> Router<State> {
         .route("/api/auth/totp/setup", get(totp_setup))
         .route("/api/auth/totp/enable", post(totp_enable))
         // Plans
+        .route("/api/plans", post(create_plan))
         .route("/api/plans/daily", get(daily_plans))
         .route(
             "/api/plans/{template_id}/exercises",
@@ -278,6 +279,57 @@ async fn daily_plans(
     }
 
     Ok(Json(result))
+}
+
+#[derive(serde::Deserialize)]
+struct CreatePlanInput {
+    name: String,
+    day_of_week: Option<i32>,
+}
+
+#[derive(serde::Serialize)]
+struct CreatedPlan {
+    id: i64,
+    name: String,
+    day_of_week: Option<i32>,
+}
+
+async fn create_plan(
+    AxumState(state): AxumState<State>,
+    headers: HeaderMap,
+    Json(input): Json<CreatePlanInput>,
+) -> Result<impl IntoResponse> {
+    let mut conn = state.db.connect()?;
+    let user = auth::user_from_headers(&mut conn, &headers).await?;
+
+    // Check if a plan for this weekday already exists
+    if let Some(day) = input.day_of_week {
+        let mut stmt = conn
+            .prepare("SELECT id FROM workout_templates WHERE user_id = ? AND day_of_week = ?")
+            .await?;
+        if stmt.query_row((user.id, day)).await.is_ok() {
+            return Err(Error::BadRequest(
+                "A plan for this day already exists".into(),
+            ));
+        }
+    }
+
+    conn.execute(
+        "INSERT INTO workout_templates (user_id, name, day_of_week) VALUES (?, ?, ?)",
+        (user.id, input.name.as_str(), input.day_of_week),
+    )
+    .await?;
+
+    let id = conn.last_insert_rowid();
+
+    Ok((
+        StatusCode::CREATED,
+        Json(CreatedPlan {
+            id,
+            name: input.name,
+            day_of_week: input.day_of_week,
+        }),
+    ))
 }
 
 async fn load_last_sessions(

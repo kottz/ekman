@@ -48,6 +48,10 @@ pub enum Request {
         exercise_id: i64,
         set_number: i32,
     },
+    CreatePlan {
+        name: String,
+        day_of_week: i32,
+    },
     AddExerciseToPlan {
         template_id: i64,
         exercise_id: i64,
@@ -64,6 +68,13 @@ pub enum Request {
         name: Option<String>,
         archived: Option<bool>,
     },
+}
+
+#[derive(Debug, Clone, serde::Deserialize)]
+pub struct CreatedPlan {
+    pub id: i64,
+    pub name: String,
+    pub day_of_week: Option<i32>,
 }
 
 /// Responses from the background task.
@@ -93,6 +104,7 @@ pub enum Response {
         set_number: i32,
         result: Result<(), String>,
     },
+    PlanCreated(Result<CreatedPlan, String>),
     PlanUpdated(Result<(), String>),
     ExerciseCreated(Result<Exercise, String>),
     ExerciseUpdated(Result<Exercise, String>),
@@ -391,6 +403,20 @@ async fn handle_request(client: &Client, req: Request) -> Response {
                 .and_then(|r| r.error_for_status());
 
             Response::PlanUpdated(result.map(|_| ()).map_err(|e| e.to_string()))
+        }
+
+        Request::CreatePlan { name, day_of_week } => {
+            let result = client
+                .post(format!("{BASE_URL}/api/plans"))
+                .json(&serde_json::json!({ "name": name, "day_of_week": day_of_week }))
+                .send()
+                .await
+                .and_then(|r| r.error_for_status());
+
+            match result {
+                Ok(r) => Response::PlanCreated(r.json().await.map_err(|e| e.to_string())),
+                Err(e) => Response::PlanCreated(Err(e.to_string())),
+            }
         }
 
         Request::CreateExercise { name } => {
