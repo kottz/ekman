@@ -2,8 +2,8 @@
 
 use chrono::NaiveDate;
 use ekman_core::{
-    Activity, ActivityQuery, DaySets, Graph, GraphQuery, LoginInput, RegisterInput, Session,
-    SetInput, Template, User, WorkoutSet,
+    Activity, ActivityQuery, DaySets, Exercise, Graph, GraphQuery, LoginInput, RegisterInput,
+    Session, SetInput, Template, User, WorkoutSet,
 };
 use reqwest::{
     Client, Url,
@@ -30,6 +30,7 @@ pub enum Request {
     },
     CheckSession,
     LoadPlans,
+    LoadExercises,
     LoadGraph(i64),
     LoadActivity(ActivityQuery),
     LoadSets {
@@ -47,6 +48,14 @@ pub enum Request {
         exercise_id: i64,
         set_number: i32,
     },
+    AddExerciseToPlan {
+        template_id: i64,
+        exercise_id: i64,
+    },
+    RemoveExerciseFromPlan {
+        template_id: i64,
+        exercise_id: i64,
+    },
 }
 
 /// Responses from the background task.
@@ -56,6 +65,7 @@ pub enum Response {
     Registered(Result<Session, String>),
     SessionChecked(Result<User, String>),
     Plans(Result<Vec<Template>, String>),
+    Exercises(Result<Vec<Exercise>, String>),
     Graph(i64, Result<Graph, String>),
     Activity(Result<Activity, String>),
     SetsLoaded {
@@ -75,6 +85,7 @@ pub enum Response {
         set_number: i32,
         result: Result<(), String>,
     },
+    PlanUpdated(Result<(), String>),
 }
 
 pub struct ApiClient {
@@ -92,10 +103,9 @@ impl ApiClient {
         // Load existing cookie
         if cookie_path.exists()
             && let Ok(data) = fs::read_to_string(&cookie_path)
-            && !data.trim().is_empty()
-        {
-            jar.add_cookie_str(data.trim(), &url);
-        }
+                && !data.trim().is_empty() {
+                    jar.add_cookie_str(data.trim(), &url);
+                }
 
         let client = Client::builder()
             .cookie_provider(Arc::clone(&jar))
@@ -126,14 +136,13 @@ impl ApiClient {
 
         if let Some(header) = self.jar.cookies(&url)
             && let Ok(value) = header.to_str()
-            && !value.is_empty()
-        {
-            let persisted = format!("{value}; Path=/");
-            if let Some(parent) = self.cookie_path.parent() {
-                let _ = fs::create_dir_all(parent);
-            }
-            let _ = fs::write(&self.cookie_path, persisted);
-        }
+                && !value.is_empty() {
+                    let persisted = format!("{value}; Path=/");
+                    if let Some(parent) = self.cookie_path.parent() {
+                        let _ = fs::create_dir_all(parent);
+                    }
+                    let _ = fs::write(&self.cookie_path, persisted);
+                }
     }
 }
 
@@ -328,6 +337,48 @@ async fn handle_request(client: &Client, req: Request) -> Response {
                 set_number,
                 result: result.map(|_| ()).map_err(|e| e.to_string()),
             }
+        }
+
+        Request::LoadExercises => {
+            let result = client
+                .get(format!("{BASE_URL}/api/exercises"))
+                .send()
+                .await
+                .and_then(|r| r.error_for_status());
+
+            match result {
+                Ok(r) => Response::Exercises(r.json().await.map_err(|e| e.to_string())),
+                Err(e) => Response::Exercises(Err(e.to_string())),
+            }
+        }
+
+        Request::AddExerciseToPlan {
+            template_id,
+            exercise_id,
+        } => {
+            let result = client
+                .post(format!("{BASE_URL}/api/plans/{template_id}/exercises"))
+                .json(&serde_json::json!({ "exercise_id": exercise_id }))
+                .send()
+                .await
+                .and_then(|r| r.error_for_status());
+
+            Response::PlanUpdated(result.map(|_| ()).map_err(|e| e.to_string()))
+        }
+
+        Request::RemoveExerciseFromPlan {
+            template_id,
+            exercise_id,
+        } => {
+            let result = client
+                .delete(format!(
+                    "{BASE_URL}/api/plans/{template_id}/exercises/{exercise_id}"
+                ))
+                .send()
+                .await
+                .and_then(|r| r.error_for_status());
+
+            Response::PlanUpdated(result.map(|_| ()).map_err(|e| e.to_string()))
         }
     }
 }

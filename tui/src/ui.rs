@@ -1,6 +1,6 @@
 //! UI rendering.
 
-use crate::state::{App, AuthField, ExerciseState, Focus, View};
+use crate::state::{App, AuthField, ExerciseState, Focus, ManageMode, View};
 use chrono::Utc;
 use ekman_core::{ActivityDay, Graph};
 use qrcode::QrCode;
@@ -10,25 +10,40 @@ use ratatui::{
     style::{Color, Modifier, Style, Stylize},
     symbols,
     text::{Line, Span},
-    widgets::{Axis, Block, Cell, Chart, Dataset, GraphType, Paragraph, Row, Table},
+    widgets::{
+        Axis, Block, Cell, Chart, Dataset, GraphType, List, ListItem, Paragraph, Row, Table,
+    },
 };
 use std::fmt::Write;
 use tui_qrcode::{Colors, QrCodeWidget};
 
-const HINTS: &str = "←/→: set • Tab: navigate • ↑/↓: weight/reps • W/F: ±2.5kg • N/E: exercise • A/S: day • R: today • D: delete • q: quit";
+const WORKOUT_HINTS: &str = "←/→: set • Tab: navigate • ↑/↓: weight/reps • W/F: ±2.5kg • N/E: exercise • A/S: day • R: today • D: delete • F2: manage • q: quit";
+const MANAGE_HINTS: &str = "N/E: day • ↑/↓: exercise • A: add • D: remove • F1: workout • q: quit";
+const MANAGE_ADD_HINTS: &str = "Type to search • ↑/↓: select • Enter: confirm • Esc: cancel";
+
+const WEEKDAYS: [&str; 7] = [
+    "Monday",
+    "Tuesday",
+    "Wednesday",
+    "Thursday",
+    "Friday",
+    "Saturday",
+    "Sunday",
+];
 
 pub fn render(app: &App, frame: &mut Frame) {
     match app.view {
         View::Auth => render_auth(app, frame),
-        View::Dashboard => render_dashboard(app, frame),
+        View::Workout => render_workout(app, frame),
+        View::Manage => render_manage(app, frame),
     }
 }
 
 // ============================================================================
-// Dashboard
+// Workout View
 // ============================================================================
 
-fn render_dashboard(app: &App, frame: &mut Frame) {
+fn render_workout(app: &App, frame: &mut Frame) {
     let [top, main, status] = Layout::vertical([
         Constraint::Length(5),
         Constraint::Min(0),
@@ -46,7 +61,7 @@ fn render_dashboard(app: &App, frame: &mut Frame) {
     render_activity(frame, activity_area, &app.activity, &app.day.to_string());
     render_graphs(frame, graph_area, &app.graphs);
     render_exercises(frame, exercise_area, &app.exercises, app.selected);
-    render_status(frame, status, &app.status);
+    render_status(frame, status, &app.status, WORKOUT_HINTS);
 }
 
 fn render_day(frame: &mut Frame, area: Rect, app: &App) {
@@ -291,13 +306,146 @@ fn render_exercise(frame: &mut Frame, area: Rect, ex: &ExerciseState, idx: usize
     frame.render_widget(table, inner);
 }
 
-fn render_status(frame: &mut Frame, area: Rect, status: &str) {
-    let lines = vec![Line::from(status.to_string()), Line::from(HINTS)];
+fn render_status(frame: &mut Frame, area: Rect, status: &str, hints: &str) {
+    let lines = vec![Line::from(status.to_string()), Line::from(hints)];
 
     frame.render_widget(
         Paragraph::new(lines).block(Block::bordered().title("Status")),
         area,
     );
+}
+
+// ============================================================================
+// Manage View
+// ============================================================================
+
+fn render_manage(app: &App, frame: &mut Frame) {
+    let [main, status] =
+        Layout::vertical([Constraint::Min(0), Constraint::Length(4)]).areas(frame.area());
+
+    let hints = match app.manage.mode {
+        ManageMode::Browse => MANAGE_HINTS,
+        ManageMode::AddExercise => MANAGE_ADD_HINTS,
+    };
+
+    render_manage_main(frame, main, app);
+    render_status(frame, status, &app.status, hints);
+}
+
+fn render_manage_main(frame: &mut Frame, area: Rect, app: &App) {
+    let [left, right] =
+        Layout::horizontal([Constraint::Percentage(50), Constraint::Percentage(50)]).areas(area);
+
+    render_weekly_plans(frame, left, app);
+
+    match app.manage.mode {
+        ManageMode::Browse => render_plan_details(frame, right, app),
+        ManageMode::AddExercise => render_exercise_search(frame, right, app),
+    }
+}
+
+fn render_weekly_plans(frame: &mut Frame, area: Rect, app: &App) {
+    let items: Vec<ListItem> = WEEKDAYS
+        .iter()
+        .enumerate()
+        .map(|(i, day_name)| {
+            let plan = app.plan_for_weekday(i);
+            let exercise_count = plan.map(|p| p.exercises.len()).unwrap_or(0);
+            let plan_name = plan.map(|p| p.name.as_str()).unwrap_or("No plan");
+
+            let style = if i == app.manage.selected_day {
+                Style::default().yellow().bold()
+            } else {
+                Style::default()
+            };
+
+            let content = format!("{day_name}: {plan_name} ({exercise_count} exercises)");
+            ListItem::new(content).style(style)
+        })
+        .collect();
+
+    let list = List::new(items)
+        .block(Block::bordered().title("Weekly Plans"))
+        .highlight_style(Style::default().yellow().bold());
+
+    frame.render_widget(list, area);
+}
+
+fn render_plan_details(frame: &mut Frame, area: Rect, app: &App) {
+    let day_name = WEEKDAYS[app.manage.selected_day];
+    let plan = app.plan_for_weekday(app.manage.selected_day);
+
+    let title = match plan {
+        Some(p) => format!("{} - {}", day_name, p.name),
+        None => format!("{} - No plan", day_name),
+    };
+
+    let items: Vec<ListItem> = match plan {
+        Some(p) => p
+            .exercises
+            .iter()
+            .enumerate()
+            .map(|(i, ex)| {
+                let style = if i == app.manage.selected_exercise {
+                    Style::default().cyan().bold()
+                } else {
+                    Style::default()
+                };
+                let sets_info = ex
+                    .target_sets
+                    .map(|s| format!(" ({s} sets)"))
+                    .unwrap_or_default();
+                ListItem::new(format!("• {}{}", ex.name, sets_info)).style(style)
+            })
+            .collect(),
+        None => vec![ListItem::new("No exercises configured").style(Style::default().dim())],
+    };
+
+    let list = List::new(items).block(Block::bordered().title(title));
+    frame.render_widget(list, area);
+}
+
+fn render_exercise_search(frame: &mut Frame, area: Rect, app: &App) {
+    let [search_area, results_area] =
+        Layout::vertical([Constraint::Length(3), Constraint::Min(0)]).areas(area);
+
+    // Search input
+    let search_text = if app.manage.search_query.is_empty() {
+        "Type to search exercises...".to_string()
+    } else {
+        app.manage.search_query.clone()
+    };
+
+    let search_style = if app.manage.search_query.is_empty() {
+        Style::default().dim()
+    } else {
+        Style::default().yellow()
+    };
+
+    let search = Paragraph::new(search_text)
+        .style(search_style)
+        .block(Block::bordered().title("Search Exercise"));
+    frame.render_widget(search, search_area);
+
+    // Results
+    let items: Vec<ListItem> = app
+        .manage
+        .search_results
+        .iter()
+        .enumerate()
+        .map(|(i, ex)| {
+            let style = if i == app.manage.search_cursor {
+                Style::default().green().bold()
+            } else {
+                Style::default()
+            };
+            ListItem::new(ex.name.clone()).style(style)
+        })
+        .collect();
+
+    let results_title = format!("Results ({})", app.manage.search_results.len());
+    let results = List::new(items).block(Block::bordered().title(results_title));
+    frame.render_widget(results, results_area);
 }
 
 // ============================================================================

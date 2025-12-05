@@ -3,7 +3,8 @@
 use base32::{Alphabet, encode as b32_encode};
 use chrono::{DateTime, Datelike, Duration, Local, NaiveDate, Utc};
 use ekman_core::{
-    ActivityDay, ActivityQuery, DaySets, Graph, SetInput, Template, TemplateExercise, WorkoutSet,
+    ActivityDay, ActivityQuery, DaySets, Exercise, Graph, SetInput, Template, TemplateExercise,
+    WorkoutSet,
 };
 use rand::{RngCore, rngs::OsRng};
 use std::collections::HashSet;
@@ -18,7 +19,8 @@ const ACTIVITY_DAYS: i64 = 21;
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum View {
     Auth,
-    Dashboard,
+    Workout,
+    Manage,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -34,6 +36,12 @@ pub enum Focus {
     Reps,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ManageMode {
+    Browse,
+    AddExercise,
+}
+
 pub struct App {
     pub running: bool,
     pub view: View,
@@ -44,8 +52,10 @@ pub struct App {
     pub activity: Vec<ActivityDay>,
     pub selected: usize,
     pub status: String,
+    pub manage: ManageState,
     api: ApiClient,
     plans: Vec<Template>,
+    all_exercises: Vec<Exercise>,
     pending_graphs: HashSet<i64>,
     loading_sets: HashSet<(NaiveDate, i64)>,
 }
@@ -81,6 +91,57 @@ pub struct SetState {
     pub pending: bool,
 }
 
+pub struct ManageState {
+    pub mode: ManageMode,
+    pub selected_day: usize, // 0-6 for Mon-Sun
+    pub selected_exercise: usize,
+    pub search_query: String,
+    pub search_results: Vec<Exercise>,
+    pub search_cursor: usize,
+}
+
+impl ManageState {
+    pub fn new() -> Self {
+        Self {
+            mode: ManageMode::Browse,
+            selected_day: 0,
+            selected_exercise: 0,
+            search_query: String::new(),
+            search_results: Vec::new(),
+            search_cursor: 0,
+        }
+    }
+
+    pub fn start_add(&mut self) {
+        self.mode = ManageMode::AddExercise;
+        self.search_query.clear();
+        self.search_results.clear();
+        self.search_cursor = 0;
+    }
+
+    pub fn cancel_add(&mut self) {
+        self.mode = ManageMode::Browse;
+        self.search_query.clear();
+        self.search_results.clear();
+    }
+
+    pub fn update_search(&mut self, exercises: &[Exercise]) {
+        let query = self.search_query.to_lowercase();
+        if query.is_empty() {
+            self.search_results = exercises.iter().filter(|e| !e.archived).cloned().collect();
+        } else {
+            self.search_results = exercises
+                .iter()
+                .filter(|e| !e.archived && e.name.to_lowercase().contains(&query))
+                .cloned()
+                .collect();
+        }
+        self.search_cursor = self
+            .search_cursor
+            .min(self.search_results.len().saturating_sub(1));
+    }
+}
+
 impl App {
     pub fn new() -> color_eyre::Result<Self> {
         let cookie_path = config_dir().join("session.cookie");
@@ -96,8 +157,10 @@ impl App {
             activity: Vec::new(),
             selected: 0,
             status: String::new(),
+            manage: ManageState::new(),
             api,
             plans: Vec::new(),
+            all_exercises: Vec::new(),
             pending_graphs: HashSet::new(),
             loading_sets: HashSet::new(),
         })
@@ -114,18 +177,18 @@ impl App {
     }
 
     pub fn tick(&mut self) {
-        if self.view != View::Dashboard {
+        if self.view != View::Workout {
             return;
         }
 
         // Auto-advance after timeout
         if let Some(ex) = self.exercises.get_mut(self.selected)
             && ex.focus == Focus::Reps
-            && ex.should_auto_advance()
-            && ex.sets.get(ex.cursor).and_then(|s| s.reps).is_some()
-        {
-            self.advance_set();
-        }
+                && ex.should_auto_advance()
+                && ex.sets.get(ex.cursor).and_then(|s| s.reps).is_some()
+            {
+                self.advance_set();
+            }
     }
 
     fn handle_response(&mut self, resp: Response) {
@@ -242,15 +305,34 @@ impl App {
                     Err(e) => self.status = format!("Delete error: {e}"),
                 }
             }
+
+            Response::Exercises(result) => match result {
+                Ok(exercises) => {
+                    self.all_exercises = exercises;
+                    if self.manage.mode == ManageMode::AddExercise {
+                        self.manage.update_search(&self.all_exercises);
+                    }
+                }
+                Err(e) => self.status = format!("Load exercises error: {e}"),
+            },
+
+            Response::PlanUpdated(result) => match result {
+                Ok(()) => {
+                    self.status = "Plan updated".into();
+                    self.api.send(Request::LoadPlans);
+                }
+                Err(e) => self.status = format!("Update plan error: {e}"),
+            },
         }
     }
 
     fn on_logged_in(&mut self, username: String) {
-        self.view = View::Dashboard;
+        self.view = View::Workout;
         self.auth.submitting = false;
         self.status = format!("Signed in as {username}");
         self.api.save_cookie();
         self.api.send(Request::LoadPlans);
+        self.api.send(Request::LoadExercises);
         self.request_activity();
     }
 
@@ -689,6 +771,135 @@ impl App {
             .or_else(|| self.plans.first())
             .map(|p| p.name.as_str())
     }
+
+    // View switching
+
+    pub fn switch_to_workout(&mut self) {
+        self.view = View::Workout;
+        self.manage.cancel_add();
+    }
+
+    pub fn switch_to_manage(&mut self) {
+        self.view = View::Manage;
+        self.manage.mode = ManageMode::Browse;
+        self.api.send(Request::LoadExercises);
+    }
+
+    // Management methods
+
+    pub fn manage_select_day(&mut self, delta: i32) {
+        if self.manage.mode != ManageMode::Browse {
+            return;
+        }
+        let len = 7i32; // days of week
+        let next = (self.manage.selected_day as i32 + delta).rem_euclid(len);
+        self.manage.selected_day = next as usize;
+        self.manage.selected_exercise = 0;
+    }
+
+    pub fn manage_select_exercise(&mut self, delta: i32) {
+        if self.manage.mode != ManageMode::Browse {
+            return;
+        }
+        let plan = self.plan_for_weekday(self.manage.selected_day);
+        let len = plan.map(|p| p.exercises.len()).unwrap_or(0) as i32;
+        if len == 0 {
+            self.manage.selected_exercise = 0;
+            return;
+        }
+        let next = (self.manage.selected_exercise as i32 + delta).clamp(0, len - 1);
+        self.manage.selected_exercise = next as usize;
+    }
+
+    pub fn manage_start_add(&mut self) {
+        self.manage.start_add();
+        self.manage.update_search(&self.all_exercises);
+    }
+
+    pub fn manage_cancel_add(&mut self) {
+        self.manage.cancel_add();
+    }
+
+    pub fn manage_search_input(&mut self, ch: char) {
+        if self.manage.mode != ManageMode::AddExercise {
+            return;
+        }
+        self.manage.search_query.push(ch);
+        self.manage.update_search(&self.all_exercises);
+    }
+
+    pub fn manage_search_backspace(&mut self) {
+        if self.manage.mode != ManageMode::AddExercise {
+            return;
+        }
+        self.manage.search_query.pop();
+        self.manage.update_search(&self.all_exercises);
+    }
+
+    pub fn manage_search_move(&mut self, delta: i32) {
+        if self.manage.mode != ManageMode::AddExercise {
+            return;
+        }
+        let len = self.manage.search_results.len() as i32;
+        if len == 0 {
+            return;
+        }
+        let next = (self.manage.search_cursor as i32 + delta).clamp(0, len - 1);
+        self.manage.search_cursor = next as usize;
+    }
+
+    pub fn manage_confirm_add(&mut self) {
+        if self.manage.mode != ManageMode::AddExercise {
+            return;
+        }
+        let Some(exercise) = self
+            .manage
+            .search_results
+            .get(self.manage.search_cursor)
+            .cloned()
+        else {
+            return;
+        };
+        let Some(plan) = self.plan_for_weekday(self.manage.selected_day) else {
+            self.status = "No plan for this day".into();
+            return;
+        };
+
+        self.api.send(Request::AddExerciseToPlan {
+            template_id: plan.id,
+            exercise_id: exercise.id,
+        });
+        self.manage.cancel_add();
+        self.status = format!("Adding {} to plan...", exercise.name);
+    }
+
+    pub fn manage_delete_exercise(&mut self) {
+        if self.manage.mode != ManageMode::Browse {
+            return;
+        }
+        let Some(plan) = self.plan_for_weekday(self.manage.selected_day) else {
+            return;
+        };
+        let Some(exercise) = plan.exercises.get(self.manage.selected_exercise) else {
+            return;
+        };
+
+        self.api.send(Request::RemoveExerciseFromPlan {
+            template_id: plan.id,
+            exercise_id: exercise.exercise_id,
+        });
+        self.status = format!("Removing {} from plan...", exercise.name);
+    }
+
+    pub fn plan_for_weekday(&self, weekday: usize) -> Option<&Template> {
+        self.plans
+            .iter()
+            .find(|p| p.day_of_week == Some(weekday as i32))
+    }
+
+    pub fn plans(&self) -> &[Template] {
+        &self.plans
+    }
 }
 
 impl AuthState {
@@ -804,9 +1015,10 @@ impl ExerciseState {
         }
 
         let should_reset = self.last_input.is_none_or(|t| t.elapsed() > INPUT_TIMEOUT);
-        if should_reset && let Some(set) = self.sets.get_mut(self.cursor) {
-            set.weight.clear();
-        }
+        if should_reset
+            && let Some(set) = self.sets.get_mut(self.cursor) {
+                set.weight.clear();
+            }
 
         if let Some(set) = self.sets.get_mut(self.cursor) {
             set.weight.push(ch);

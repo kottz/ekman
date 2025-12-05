@@ -5,7 +5,7 @@ use axum::{
     extract::{Path, Query, State as AxumState},
     http::{HeaderMap, StatusCode, header},
     response::IntoResponse,
-    routing::{get, post, put},
+    routing::{delete, get, post, put},
 };
 use chrono::{DateTime, Duration, NaiveDate, Utc};
 use turso::{Connection, Value};
@@ -33,6 +33,14 @@ pub fn api() -> Router<State> {
         .route("/api/auth/totp/enable", post(totp_enable))
         // Plans
         .route("/api/plans/daily", get(daily_plans))
+        .route(
+            "/api/plans/{template_id}/exercises",
+            post(add_exercise_to_plan),
+        )
+        .route(
+            "/api/plans/{template_id}/exercises/{exercise_id}",
+            delete(remove_exercise_from_plan),
+        )
         // Activity
         .route("/api/activity/days", get(activity))
         // Exercises
@@ -551,10 +559,9 @@ async fn exercise_graph(
     let metric = query.metric.unwrap_or(Metric::MaxWeight);
 
     if let (Some(start), Some(end)) = (query.start, query.end)
-        && start > end
-    {
-        return Err(Error::BadRequest("start must be before end".into()));
-    }
+        && start > end {
+            return Err(Error::BadRequest("start must be before end".into()));
+        }
 
     let mut conn = state.db.connect()?;
     let user = auth::user_from_headers(&mut conn, &headers).await?;
@@ -793,4 +800,82 @@ async fn delete_set(
 fn parse_day(s: &str) -> Result<NaiveDate> {
     NaiveDate::parse_from_str(s, "%Y-%m-%d")
         .map_err(|_| Error::BadRequest("invalid date, expected YYYY-MM-DD".into()))
+}
+
+// ============================================================================
+// Plan management
+// ============================================================================
+
+#[derive(serde::Deserialize)]
+struct AddExerciseInput {
+    exercise_id: i64,
+}
+
+async fn add_exercise_to_plan(
+    AxumState(state): AxumState<State>,
+    Path(template_id): Path<i64>,
+    headers: HeaderMap,
+    Json(input): Json<AddExerciseInput>,
+) -> Result<impl IntoResponse> {
+    let mut conn = state.db.connect()?;
+    let user = auth::user_from_headers(&mut conn, &headers).await?;
+
+    // Verify template belongs to user
+    let mut stmt = conn
+        .prepare("SELECT id FROM workout_templates WHERE id = ? AND user_id = ?")
+        .await?;
+    stmt.query_row((template_id, user.id))
+        .await
+        .map_err(|_| Error::NotFound("template".into()))?;
+
+    // Verify exercise exists and belongs to user
+    let _ = fetch_exercise(&conn, input.exercise_id, user.id).await?;
+
+    // Get max display order
+    let mut stmt = conn
+        .prepare(
+            "SELECT COALESCE(MAX(display_order), 0) FROM template_exercises WHERE template_id = ?",
+        )
+        .await?;
+    let row = stmt.query_row([template_id]).await?;
+    let max_order: i64 = row.get(0)?;
+
+    // Insert
+    conn.execute(
+        "INSERT INTO template_exercises (template_id, exercise_id, display_order) VALUES (?, ?, ?)",
+        (template_id, input.exercise_id, max_order + 1),
+    )
+    .await?;
+
+    Ok(StatusCode::CREATED)
+}
+
+async fn remove_exercise_from_plan(
+    AxumState(state): AxumState<State>,
+    Path((template_id, exercise_id)): Path<(i64, i64)>,
+    headers: HeaderMap,
+) -> Result<impl IntoResponse> {
+    let mut conn = state.db.connect()?;
+    let user = auth::user_from_headers(&mut conn, &headers).await?;
+
+    // Verify template belongs to user
+    let mut stmt = conn
+        .prepare("SELECT id FROM workout_templates WHERE id = ? AND user_id = ?")
+        .await?;
+    stmt.query_row((template_id, user.id))
+        .await
+        .map_err(|_| Error::NotFound("template".into()))?;
+
+    let deleted = conn
+        .execute(
+            "DELETE FROM template_exercises WHERE template_id = ? AND exercise_id = ?",
+            (template_id, exercise_id),
+        )
+        .await?;
+
+    if deleted == 0 {
+        return Err(Error::NotFound("exercise not in plan".into()));
+    }
+
+    Ok(StatusCode::NO_CONTENT)
 }

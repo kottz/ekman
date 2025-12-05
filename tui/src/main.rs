@@ -5,7 +5,7 @@ mod state;
 mod ui;
 
 use crossterm::event::{self, Event, KeyCode, KeyEventKind, KeyModifiers};
-use state::{App, View};
+use state::{App, ManageMode, View};
 use std::time::{Duration, Instant};
 
 const TICK_RATE: Duration = Duration::from_millis(16);
@@ -35,17 +35,17 @@ fn run(app: &mut App, terminal: &mut ratatui::DefaultTerminal) -> color_eyre::Re
 
         let timeout = TICK_RATE.saturating_sub(last_tick.elapsed());
         if event::poll(timeout)?
-            && let Event::Key(key) = event::read()?
-        {
-            if key.kind != KeyEventKind::Press {
-                continue;
-            }
+            && let Event::Key(key) = event::read()? {
+                if key.kind != KeyEventKind::Press {
+                    continue;
+                }
 
-            match app.view {
-                View::Auth => handle_auth_key(app, key.code, key.modifiers),
-                View::Dashboard => handle_dashboard_key(app, key.code, key.modifiers),
+                match app.view {
+                    View::Auth => handle_auth_key(app, key.code, key.modifiers),
+                    View::Workout => handle_workout_key(app, key.code, key.modifiers),
+                    View::Manage => handle_manage_key(app, key.code, key.modifiers),
+                }
             }
-        }
 
         if last_tick.elapsed() >= TICK_RATE {
             last_tick = Instant::now();
@@ -72,7 +72,7 @@ fn handle_auth_key(app: &mut App, code: KeyCode, mods: KeyModifiers) {
     }
 }
 
-fn handle_dashboard_key(app: &mut App, code: KeyCode, mods: KeyModifiers) {
+fn handle_workout_key(app: &mut App, code: KeyCode, mods: KeyModifiers) {
     use KeyCode::*;
 
     // Quit
@@ -81,6 +81,12 @@ fn handle_dashboard_key(app: &mut App, code: KeyCode, mods: KeyModifiers) {
         || (code == Char('c') && mods.contains(KeyModifiers::CONTROL))
     {
         app.running = false;
+        return;
+    }
+
+    // View switching
+    if code == F(2) {
+        app.switch_to_manage();
         return;
     }
 
@@ -119,5 +125,72 @@ fn handle_dashboard_key(app: &mut App, code: KeyCode, mods: KeyModifiers) {
         Backspace => app.backspace(),
 
         _ => {}
+    }
+}
+
+fn handle_manage_key(app: &mut App, code: KeyCode, mods: KeyModifiers) {
+    use KeyCode::*;
+
+    // Global keys
+    if code == Esc {
+        if app.manage.mode == ManageMode::AddExercise {
+            app.manage_cancel_add();
+        } else {
+            app.running = false;
+        }
+        return;
+    }
+
+    if code == F(1) {
+        app.switch_to_workout();
+        return;
+    }
+
+    if code == Char('q') && app.manage.mode == ManageMode::Browse {
+        app.running = false;
+        return;
+    }
+
+    if code == Char('c') && mods.contains(KeyModifiers::CONTROL) {
+        app.running = false;
+        return;
+    }
+
+    match app.manage.mode {
+        ManageMode::Browse => match code {
+            // Day navigation (up/down through weekdays)
+            Char('n') => app.manage_select_day(1),
+            Char('e') => app.manage_select_day(-1),
+
+            // Exercise navigation within day
+            Down => app.manage_select_exercise(1),
+            Up => app.manage_select_exercise(-1),
+
+            // Add exercise
+            Char('a') => app.manage_start_add(),
+
+            // Delete exercise from plan
+            Char('d') => app.manage_delete_exercise(),
+
+            _ => {}
+        },
+
+        ManageMode::AddExercise => match code {
+            // Navigate search results
+            Down => app.manage_search_move(1),
+            Up => app.manage_search_move(-1),
+
+            // Confirm selection
+            Enter => app.manage_confirm_add(),
+
+            // Cancel
+            Backspace if app.manage.search_query.is_empty() => app.manage_cancel_add(),
+            Backspace => app.manage_search_backspace(),
+
+            // Type search query
+            Char(ch) if !ch.is_control() => app.manage_search_input(ch),
+
+            _ => {}
+        },
     }
 }
