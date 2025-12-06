@@ -1,0 +1,208 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, user-scalable=no">
+    <title>Ekman - Workout Tracker</title>
+    <link rel="stylesheet" href="style.css">
+    <link rel="preconnect" href="https://fonts.googleapis.com">
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+    <link href="https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@400;500;600;700&family=DM+Sans:wght@400;500;600;700&display=swap" rel="stylesheet">
+</head>
+<body>
+    <div id="app">
+        <!-- Auth View -->
+        <div id="auth-view" class="view">
+            <div class="auth-container">
+                <h1 class="logo">EKMAN</h1>
+                <p class="tagline">workout tracker</p>
+                
+                <div class="auth-tabs">
+                    <button class="tab active" data-tab="login">Login</button>
+                    <button class="tab" data-tab="register">Register</button>
+                </div>
+                
+                <form id="auth-form">
+                    <div class="input-group">
+                        <label for="username">Username</label>
+                        <input type="text" id="username" name="username" autocomplete="username" required>
+                    </div>
+                    
+                    <div class="input-group">
+                        <label for="password">Password</label>
+                        <input type="password" id="password" name="password" autocomplete="current-password" required>
+                    </div>
+                    
+                    <div id="totp-section">
+                        <div class="input-group">
+                            <label for="totp">TOTP Code</label>
+                            <input type="text" id="totp" name="totp" inputmode="numeric" pattern="[0-9]*" maxlength="6" autocomplete="one-time-code">
+                        </div>
+                        
+                        <div id="qr-section" class="hidden">
+                            <p class="qr-instruction">Scan with your authenticator app:</p>
+                            <canvas id="qr-code"></canvas>
+                            <p class="secret-display">Secret: <code id="totp-secret"></code></p>
+                        </div>
+                    </div>
+                    
+                    <button type="submit" class="btn-primary" id="auth-submit">Login</button>
+                    <p id="auth-status" class="status"></p>
+                </form>
+            </div>
+        </div>
+
+        <!-- Main App View -->
+        <div id="main-view" class="view hidden">
+            <!-- Navigation -->
+            <nav class="bottom-nav">
+                <button class="nav-btn active" data-view="workout">
+                    <span class="nav-icon">💪</span>
+                    <span class="nav-label">Workout</span>
+                </button>
+                <button class="nav-btn" data-view="plans">
+                    <span class="nav-icon">📋</span>
+                    <span class="nav-label">Plans</span>
+                </button>
+                <button class="nav-btn" data-view="exercises">
+                    <span class="nav-icon">🏋️</span>
+                    <span class="nav-label">Exercises</span>
+                </button>
+            </nav>
+
+            <!-- Workout Tab -->
+            <div id="workout-tab" class="tab-content active">
+                <header class="app-header">
+                    <div class="day-nav">
+                        <button class="day-btn" id="prev-day">◀</button>
+                        <div class="day-display">
+                            <span id="current-day">Monday</span>
+                            <span id="current-date">2024-01-15</span>
+                        </div>
+                        <button class="day-btn" id="next-day">▶</button>
+                    </div>
+                    <button class="today-btn" id="today-btn">Today</button>
+                </header>
+
+                <div id="activity-bar" class="activity-bar"></div>
+
+                <div id="exercises-list" class="exercises-list">
+                    <!-- Exercise cards will be inserted here -->
+                </div>
+
+                <div id="no-exercises" class="empty-state hidden">
+                    <p>No exercises for today</p>
+                    <p class="hint">Go to Plans to set up your workout</p>
+                </div>
+            </div>
+
+            <!-- Plans Tab -->
+            <div id="plans-tab" class="tab-content hidden">
+                <header class="app-header">
+                    <h2>Weekly Plans</h2>
+                </header>
+
+                <div class="weekday-list" id="weekday-list">
+                    <!-- Weekday items will be inserted here -->
+                </div>
+
+                <div id="plan-detail" class="plan-detail hidden">
+                    <div class="plan-header">
+                        <button class="back-btn" id="back-to-plans">← Back</button>
+                        <h3 id="plan-day-name">Monday</h3>
+                    </div>
+                    <div id="plan-exercises" class="plan-exercises">
+                        <!-- Plan exercises will be inserted here -->
+                    </div>
+                    <button class="btn-add" id="add-to-plan">+ Add Exercise</button>
+                </div>
+
+                <!-- Add Exercise Modal -->
+                <div id="exercise-search-modal" class="modal hidden">
+                    <div class="modal-content">
+                        <div class="modal-header">
+                            <h3>Add Exercise</h3>
+                            <button class="close-btn" id="close-search">×</button>
+                        </div>
+                        <input type="text" id="exercise-search" placeholder="Search exercises...">
+                        <div id="search-results" class="search-results"></div>
+                    </div>
+                </div>
+            </div>
+
+            <!-- Exercises Tab -->
+            <div id="exercises-tab" class="tab-content hidden">
+                <header class="app-header">
+                    <h2>Exercises</h2>
+                    <label class="toggle-archived">
+                        <input type="checkbox" id="show-archived">
+                        <span>Show archived</span>
+                    </label>
+                </header>
+
+                <div id="all-exercises-list" class="all-exercises-list">
+                    <!-- All exercises will be inserted here -->
+                </div>
+
+                <button class="btn-fab" id="add-exercise-btn">+</button>
+
+                <!-- Exercise Modal -->
+                <div id="exercise-modal" class="modal hidden">
+                    <div class="modal-content">
+                        <div class="modal-header">
+                            <h3 id="exercise-modal-title">New Exercise</h3>
+                            <button class="close-btn" id="close-exercise-modal">×</button>
+                        </div>
+                        <div class="input-group">
+                            <label for="exercise-name">Name</label>
+                            <input type="text" id="exercise-name" placeholder="Exercise name">
+                        </div>
+                        <div class="modal-actions">
+                            <button class="btn-secondary" id="cancel-exercise">Cancel</button>
+                            <button class="btn-primary" id="save-exercise">Save</button>
+                        </div>
+                    </div>
+                </div>
+            </div>
+
+            <!-- Status Bar -->
+            <div id="status-bar" class="status-bar"></div>
+        </div>
+    </div>
+
+    <!-- Set Input Modal -->
+    <div id="set-modal" class="modal hidden">
+        <div class="modal-content set-modal-content">
+            <div class="modal-header">
+                <h3 id="set-exercise-name">Exercise</h3>
+                <button class="close-btn" id="close-set-modal">×</button>
+            </div>
+            <div class="set-input-container">
+                <div class="set-info">
+                    <span id="set-number">Set 1</span>
+                </div>
+                <div class="set-inputs">
+                    <div class="input-group">
+                        <label>Weight (kg)</label>
+                        <div class="weight-input">
+                            <button class="weight-btn" data-delta="-2.5">−2.5</button>
+                            <input type="number" id="set-weight" step="0.5" inputmode="decimal">
+                            <button class="weight-btn" data-delta="2.5">+2.5</button>
+                        </div>
+                    </div>
+                    <div class="input-group">
+                        <label>Reps</label>
+                        <input type="number" id="set-reps" inputmode="numeric" min="0" max="999">
+                    </div>
+                </div>
+                <div class="modal-actions">
+                    <button class="btn-danger" id="delete-set">Delete</button>
+                    <button class="btn-primary" id="save-set">Save</button>
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <script src="app.js"></script>
+</body>
+</html>
