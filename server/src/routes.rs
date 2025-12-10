@@ -14,7 +14,7 @@ use ekman_core::{
     self as core, Activity, ActivityDay, ActivityQuery, CompactSet, CreateExercise, DaySets,
     Exercise, Graph, GraphQuery, LastSession, LoginInput, Metric, Owner, RegisterInput, Session,
     SetData, SetInput, Template, TemplateExercise, TotpSetup, TotpVerify, UpdateExercise, User,
-    WorkoutSet,
+    WeightEntry, WeightHistory, WeightInput, WorkoutSet,
 };
 
 use crate::{Error, Result, State, auth, db};
@@ -60,6 +60,12 @@ pub fn api() -> Router<State> {
         .route(
             "/api/days/{date}/exercises/{exercise_id}/sets/{set_number}",
             put(upsert_set).delete(delete_set),
+        )
+        // Weight
+        .route("/api/weight", get(weight_history))
+        .route(
+            "/api/weight/{date}",
+            get(get_weight).put(upsert_weight).delete(delete_weight),
         )
 }
 
@@ -928,6 +934,151 @@ async fn remove_exercise_from_plan(
 
     if deleted == 0 {
         return Err(Error::NotFound("exercise not in plan".into()));
+    }
+
+    Ok(StatusCode::NO_CONTENT)
+}
+
+// ============================================================================
+// Weight tracking
+// ============================================================================
+
+#[derive(serde::Deserialize)]
+struct WeightQuery {
+    start: Option<DateTime<Utc>>,
+    end: Option<DateTime<Utc>>,
+}
+
+async fn weight_history(
+    AxumState(state): AxumState<State>,
+    Query(query): Query<WeightQuery>,
+    headers: HeaderMap,
+) -> Result<Json<WeightHistory>> {
+    let mut conn = state.db.connect()?;
+    let user = auth::user_from_headers(&mut conn, &headers).await?;
+
+    let mut sql = String::from(
+        "SELECT id, day, weight_kg, recorded_at FROM weight_entries WHERE user_id = ?",
+    );
+    let mut params: Vec<Value> = vec![user.id.into()];
+
+    if let Some(start) = query.start {
+        sql.push_str(" AND day >= ?");
+        params.push(start.date_naive().to_string().into());
+    }
+    if let Some(end) = query.end {
+        sql.push_str(" AND day <= ?");
+        params.push(end.date_naive().to_string().into());
+    }
+
+    sql.push_str(" ORDER BY day DESC");
+
+    let mut rows = conn.query(&sql, params).await?;
+    let mut entries = Vec::new();
+
+    while let Some(row) = rows.next().await? {
+        entries.push(WeightEntry {
+            id: row.get(0)?,
+            day: row.get(1)?,
+            weight_kg: row.get(2)?,
+            recorded_at: db::parse_timestamp(&row.get::<String>(3)?)?,
+        });
+    }
+
+    Ok(Json(WeightHistory { entries }))
+}
+
+async fn get_weight(
+    AxumState(state): AxumState<State>,
+    Path(date): Path<String>,
+    headers: HeaderMap,
+) -> Result<Json<Option<WeightEntry>>> {
+    let day = parse_day(&date)?;
+
+    let mut conn = state.db.connect()?;
+    let user = auth::user_from_headers(&mut conn, &headers).await?;
+
+    let mut stmt = conn
+        .prepare("SELECT id, day, weight_kg, recorded_at FROM weight_entries WHERE user_id = ? AND day = ?")
+        .await?;
+
+    let result = stmt.query_row((user.id, day.to_string())).await;
+
+    match result {
+        Ok(row) => Ok(Json(Some(WeightEntry {
+            id: row.get(0)?,
+            day: row.get(1)?,
+            weight_kg: row.get(2)?,
+            recorded_at: db::parse_timestamp(&row.get::<String>(3)?)?,
+        }))),
+        Err(_) => Ok(Json(None)),
+    }
+}
+
+async fn upsert_weight(
+    AxumState(state): AxumState<State>,
+    Path(date): Path<String>,
+    headers: HeaderMap,
+    Json(input): Json<WeightInput>,
+) -> Result<Json<WeightEntry>> {
+    if input.weight_kg <= 0.0 {
+        return Err(Error::BadRequest("weight must be > 0".into()));
+    }
+
+    let day = parse_day(&date)?;
+    let recorded_at = input.recorded_at.unwrap_or_else(db::now);
+
+    let mut conn = state.db.connect()?;
+    let user = auth::user_from_headers(&mut conn, &headers).await?;
+
+    conn.execute(
+        "INSERT INTO weight_entries (user_id, day, weight_kg, recorded_at)
+         VALUES (?, ?, ?, ?)
+         ON CONFLICT(user_id, day) DO UPDATE SET
+            weight_kg = excluded.weight_kg,
+            recorded_at = excluded.recorded_at",
+        (
+            user.id,
+            day.to_string(),
+            input.weight_kg,
+            db::timestamp(recorded_at),
+        ),
+    )
+    .await?;
+
+    // Get the id
+    let mut stmt = conn
+        .prepare("SELECT id FROM weight_entries WHERE user_id = ? AND day = ?")
+        .await?;
+    let row = stmt.query_row((user.id, day.to_string())).await?;
+
+    Ok(Json(WeightEntry {
+        id: row.get(0)?,
+        day: day.to_string(),
+        weight_kg: input.weight_kg,
+        recorded_at,
+    }))
+}
+
+async fn delete_weight(
+    AxumState(state): AxumState<State>,
+    Path(date): Path<String>,
+    headers: HeaderMap,
+) -> Result<impl IntoResponse> {
+    let day = parse_day(&date)?;
+
+    let mut conn = state.db.connect()?;
+    let user = auth::user_from_headers(&mut conn, &headers).await?;
+
+    let deleted = conn
+        .execute(
+            "DELETE FROM weight_entries WHERE user_id = ? AND day = ?",
+            (user.id, day.to_string()),
+        )
+        .await?;
+
+    if deleted == 0 {
+        return Err(Error::NotFound("weight entry".into()));
     }
 
     Ok(StatusCode::NO_CONTENT)

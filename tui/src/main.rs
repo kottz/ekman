@@ -96,15 +96,38 @@ fn handle_workout_key(app: &mut App, code: KeyCode, mods: KeyModifiers) {
         return;
     }
 
+    // Weight row is selected
+    if app.weight_selected {
+        match code {
+            // Day navigation (always available)
+            Char('a') => app.move_day(-1),
+            Char('s') => app.move_day(1),
+            Char('r') => app.jump_to_today(),
+
+            // Navigate down to exercises
+            Char('n') => app.select_from_weight_to_exercise(),
+
+            // Weight adjustments
+            Char('w') => app.bump_body_weight(0.1),
+            Char('f') => app.bump_body_weight(-0.1),
+            Char('d') => app.delete_body_weight(),
+            Enter => app.confirm_weight(),
+            Char(ch) if ch.is_ascii_digit() || ch == '.' => app.weight_input_char(ch),
+            Backspace => app.weight_backspace(),
+            _ => {}
+        }
+        return;
+    }
+
     match code {
         // Day navigation
         Char('a') => app.move_day(-1),
         Char('s') => app.move_day(1),
         Char('r') => app.jump_to_today(),
 
-        // Exercise navigation
+        // Exercise navigation (e goes up, can reach weight row)
         Char('n') => app.select_exercise(1),
-        Char('e') => app.select_exercise(-1),
+        Char('e') => app.select_exercise_or_weight(-1),
 
         // Field focus
         Up | Down => app.toggle_focus(),

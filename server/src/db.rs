@@ -63,6 +63,17 @@ CREATE TABLE IF NOT EXISTS sessions (
 );
 
 CREATE INDEX IF NOT EXISTS idx_sessions_token ON sessions(token);
+
+CREATE TABLE IF NOT EXISTS weight_entries (
+    id INTEGER PRIMARY KEY,
+    user_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+    day TEXT NOT NULL,
+    weight_kg REAL NOT NULL,
+    recorded_at TEXT NOT NULL,
+    UNIQUE(user_id, day)
+);
+
+CREATE INDEX IF NOT EXISTS idx_weight_user_day ON weight_entries(user_id, day);
 "#;
 
 pub async fn init(path: &str) -> Result<Database> {

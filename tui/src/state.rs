@@ -4,7 +4,7 @@ use base32::{Alphabet, encode as b32_encode};
 use chrono::{DateTime, Datelike, Duration, Local, NaiveDate, Utc};
 use ekman_core::{
     ActivityDay, ActivityQuery, DaySets, Exercise, Graph, SetInput, Template, TemplateExercise,
-    WorkoutSet,
+    WeightEntry, WeightInput, WorkoutSet,
 };
 use rand::{RngCore, rngs::OsRng};
 use std::collections::HashSet;
@@ -62,11 +62,20 @@ pub struct App {
     pub status: String,
     pub manage: ManageState,
     pub exercise_edit: ExerciseEditState,
+    pub weight_selected: bool,
+    pub weight: WeightState,
     api: ApiClient,
     plans: Vec<Template>,
     all_exercises: Vec<Exercise>,
     pending_graphs: HashSet<i64>,
     loading_sets: HashSet<(NaiveDate, i64)>,
+}
+
+pub struct WeightState {
+    pub entry: Option<WeightEntry>,
+    pub input: String,
+    pub default_weight: f64,
+    pub pending: bool,
 }
 
 pub struct AuthState {
@@ -161,6 +170,41 @@ pub struct ExerciseEditState {
     pub filtered: Vec<Exercise>,
 }
 
+impl WeightState {
+    pub fn new() -> Self {
+        Self {
+            entry: None,
+            input: String::new(),
+            default_weight: 70.0, // Reasonable default
+            pending: false,
+        }
+    }
+
+    pub fn reset(&mut self) {
+        self.entry = None;
+        self.input.clear();
+        self.pending = false;
+    }
+
+    pub fn display(&self) -> String {
+        if !self.input.is_empty() {
+            format!("{} kg", self.input)
+        } else if let Some(entry) = &self.entry {
+            format!("{:.1} kg", entry.weight_kg)
+        } else {
+            "-- kg".to_string()
+        }
+    }
+
+    pub fn current_value(&self) -> Option<f64> {
+        if !self.input.is_empty() {
+            self.input.parse().ok()
+        } else {
+            self.entry.as_ref().map(|e| e.weight_kg)
+        }
+    }
+}
+
 impl ExerciseEditState {
     pub fn new() -> Self {
         Self {
@@ -220,6 +264,8 @@ impl App {
             status: String::new(),
             manage: ManageState::new(),
             exercise_edit: ExerciseEditState::new(),
+            weight_selected: false,
+            weight: WeightState::new(),
             api,
             plans: Vec::new(),
             all_exercises: Vec::new(),
@@ -428,6 +474,57 @@ impl App {
                 }
                 Err(e) => self.status = format!("Update exercise error: {e}"),
             },
+
+            Response::WeightLoaded { day, result } => {
+                if day != self.day {
+                    return;
+                }
+                match result {
+                    Ok(entry) => {
+                        if let Some(e) = &entry {
+                            self.weight.default_weight = e.weight_kg;
+                        }
+                        self.weight.entry = entry;
+                        self.weight.input.clear();
+                        self.weight.pending = false;
+                    }
+                    Err(e) => self.status = format!("Load weight error: {e}"),
+                }
+            }
+
+            Response::WeightSaved { day, result } => {
+                if day != self.day {
+                    return;
+                }
+                match result {
+                    Ok(entry) => {
+                        self.status = format!("Weight saved: {:.1} kg", entry.weight_kg);
+                        self.weight.default_weight = entry.weight_kg;
+                        self.weight.entry = Some(entry);
+                        self.weight.input.clear();
+                        self.weight.pending = false;
+                    }
+                    Err(e) => {
+                        self.status = format!("Save weight error: {e}");
+                        self.weight.pending = false;
+                    }
+                }
+            }
+
+            Response::WeightDeleted { day, result } => {
+                if day != self.day {
+                    return;
+                }
+                match result {
+                    Ok(()) => {
+                        self.status = "Weight deleted".into();
+                        self.weight.entry = None;
+                        self.weight.input.clear();
+                        self.weight.pending = false;
+                    }
+                    Err(e) => self.status = format!("Delete weight error: {e}"),
+                }
+            }
         }
     }
 
@@ -439,6 +536,11 @@ impl App {
         self.api.send(Request::LoadPlans);
         self.api.send(Request::LoadExercises);
         self.request_activity();
+        self.request_weight();
+    }
+
+    fn request_weight(&self) {
+        self.api.send(Request::LoadWeight { day: self.day });
     }
 
     fn request_activity(&self) {
@@ -493,7 +595,9 @@ impl App {
     fn apply_day(&mut self, day: NaiveDate) {
         self.day = day;
         self.selected = 0;
+        self.weight_selected = false;
         self.loading_sets.clear();
+        self.weight.reset();
 
         // Find matching plan
         let weekday = day.weekday().num_days_from_monday() as i32;
@@ -525,6 +629,7 @@ impl App {
 
         self.request_all_graphs();
         self.request_all_sets();
+        self.request_weight();
     }
 
     // Auth actions
@@ -1146,6 +1251,73 @@ impl App {
         self.plans
             .iter()
             .find(|p| p.day_of_week == Some(weekday as i32))
+    }
+
+    // Weight methods
+
+    /// Navigate from weight row down to first exercise
+    pub fn select_from_weight_to_exercise(&mut self) {
+        self.weight_selected = false;
+        self.selected = 0;
+    }
+
+    /// Navigate up from exercises - if at top, go to weight row
+    pub fn select_exercise_or_weight(&mut self, delta: i32) {
+        if delta < 0 && self.selected == 0 {
+            // At first exercise, going up -> select weight
+            self.weight_selected = true;
+        } else {
+            self.select_exercise(delta);
+        }
+    }
+
+    pub fn weight_input_char(&mut self, ch: char) {
+        if !(ch.is_ascii_digit() || ch == '.') {
+            return;
+        }
+        self.weight.input.push(ch);
+    }
+
+    pub fn weight_backspace(&mut self) {
+        self.weight.input.pop();
+    }
+
+    pub fn bump_body_weight(&mut self, delta: f64) {
+        let current = self
+            .weight
+            .current_value()
+            .unwrap_or(self.weight.default_weight);
+        let new_weight = (current + delta).max(0.1);
+        self.weight.input = format!("{:.1}", new_weight);
+        self.sync_weight();
+    }
+
+    pub fn delete_body_weight(&mut self) {
+        if self.weight.entry.is_some() {
+            self.api.send(Request::DeleteWeight { day: self.day });
+            self.status = "Deleting weight...".into();
+        } else {
+            self.weight.input.clear();
+        }
+    }
+
+    pub fn confirm_weight(&mut self) {
+        self.sync_weight();
+    }
+
+    fn sync_weight(&mut self) {
+        let Some(weight_kg) = self.weight.input.parse::<f64>().ok().filter(|&w| w > 0.0) else {
+            return;
+        };
+
+        self.weight.pending = true;
+        self.api.send(Request::SaveWeight {
+            day: self.day,
+            input: WeightInput {
+                weight_kg,
+                recorded_at: Some(Utc::now()),
+            },
+        });
     }
 }
 

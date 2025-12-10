@@ -3,7 +3,7 @@
 use chrono::NaiveDate;
 use ekman_core::{
     Activity, ActivityQuery, DaySets, Exercise, Graph, GraphQuery, LoginInput, RegisterInput,
-    Session, SetInput, Template, User, WorkoutSet,
+    Session, SetInput, Template, User, WeightEntry, WeightInput, WorkoutSet,
 };
 use reqwest::{
     Client, Url,
@@ -68,6 +68,16 @@ pub enum Request {
         name: Option<String>,
         archived: Option<bool>,
     },
+    LoadWeight {
+        day: NaiveDate,
+    },
+    SaveWeight {
+        day: NaiveDate,
+        input: WeightInput,
+    },
+    DeleteWeight {
+        day: NaiveDate,
+    },
 }
 
 #[derive(Debug, Clone, serde::Deserialize)]
@@ -108,6 +118,18 @@ pub enum Response {
     PlanUpdated(Result<(), String>),
     ExerciseCreated(Result<Exercise, String>),
     ExerciseUpdated(Result<Exercise, String>),
+    WeightLoaded {
+        day: NaiveDate,
+        result: Result<Option<WeightEntry>, String>,
+    },
+    WeightSaved {
+        day: NaiveDate,
+        result: Result<WeightEntry, String>,
+    },
+    WeightDeleted {
+        day: NaiveDate,
+        result: Result<(), String>,
+    },
 }
 
 pub struct ApiClient {
@@ -452,6 +474,58 @@ async fn handle_request(client: &Client, req: Request) -> Response {
             match result {
                 Ok(r) => Response::ExerciseUpdated(r.json().await.map_err(|e| e.to_string())),
                 Err(e) => Response::ExerciseUpdated(Err(e.to_string())),
+            }
+        }
+
+        Request::LoadWeight { day } => {
+            let result = client
+                .get(format!("{BASE_URL}/api/weight/{}", day.format("%Y-%m-%d")))
+                .send()
+                .await
+                .and_then(|r| r.error_for_status());
+
+            match result {
+                Ok(r) => Response::WeightLoaded {
+                    day,
+                    result: r.json().await.map_err(|e| e.to_string()),
+                },
+                Err(e) => Response::WeightLoaded {
+                    day,
+                    result: Err(e.to_string()),
+                },
+            }
+        }
+
+        Request::SaveWeight { day, input } => {
+            let result = client
+                .put(format!("{BASE_URL}/api/weight/{}", day.format("%Y-%m-%d")))
+                .json(&input)
+                .send()
+                .await
+                .and_then(|r| r.error_for_status());
+
+            match result {
+                Ok(r) => Response::WeightSaved {
+                    day,
+                    result: r.json().await.map_err(|e| e.to_string()),
+                },
+                Err(e) => Response::WeightSaved {
+                    day,
+                    result: Err(e.to_string()),
+                },
+            }
+        }
+
+        Request::DeleteWeight { day } => {
+            let result = client
+                .delete(format!("{BASE_URL}/api/weight/{}", day.format("%Y-%m-%d")))
+                .send()
+                .await
+                .and_then(|r| r.error_for_status());
+
+            Response::WeightDeleted {
+                day,
+                result: result.map(|_| ()).map_err(|e| e.to_string()),
             }
         }
     }

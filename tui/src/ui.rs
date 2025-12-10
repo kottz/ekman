@@ -17,7 +17,7 @@ use ratatui::{
 use std::fmt::Write;
 use tui_qrcode::{Colors, QrCodeWidget};
 
-const WORKOUT_HINTS: &str = "←/→: set • Tab: navigate • ↑/↓: weight/reps • W/F: ±2.5kg • N/E: exercise • A/S: day • R: today • D: delete • F2: plans • F3: exercises • q: quit";
+const WORKOUT_HINTS: &str = "←/→: set • Tab: nav • ↑/↓: field • W/F: ±2.5kg (±0.1 for weight) • N/E: row • A/S: day • R: today • D: del • F2: plans • q: quit";
 const MANAGE_HINTS: &str =
     "N/E: day • ↑/↓: exercise • A: add • D: remove • F1: workout • F3: exercises • q: quit";
 const MANAGE_ADD_HINTS: &str = "Type to search • ↑/↓: select • Enter: confirm • Esc: cancel";
@@ -55,14 +55,19 @@ fn render_workout(app: &App, frame: &mut Frame) {
     ])
     .areas(frame.area());
 
-    let [day_area, activity_area] =
-        Layout::horizontal([Constraint::Percentage(40), Constraint::Percentage(60)]).areas(top);
+    let [day_area, activity_area, weight_area] = Layout::horizontal([
+        Constraint::Ratio(1, 3),
+        Constraint::Ratio(1, 3),
+        Constraint::Ratio(1, 3),
+    ])
+    .areas(top);
 
     let [graph_area, exercise_area] =
         Layout::horizontal([Constraint::Percentage(50), Constraint::Percentage(50)]).areas(main);
 
     render_day(frame, day_area, app);
     render_activity(frame, activity_area, &app.activity, &app.day.to_string());
+    render_weight(frame, weight_area, app);
     render_graphs(frame, graph_area, &app.graphs);
     render_exercises(frame, exercise_area, &app.exercises, app.selected);
     render_status(frame, status, &app.status, WORKOUT_HINTS);
@@ -135,6 +140,56 @@ fn render_activity(frame: &mut Frame, area: Rect, days: &[ActivityDay], selected
             .alignment(Alignment::Center),
         area,
     );
+}
+
+fn render_weight(frame: &mut Frame, area: Rect, app: &App) {
+    let is_selected = app.weight_selected;
+
+    let border_style = if is_selected {
+        Style::default().yellow()
+    } else {
+        Style::default()
+    };
+
+    let title_style = if is_selected {
+        Style::default().bold().yellow()
+    } else {
+        Style::default().bold()
+    };
+
+    let weight_display = app.weight.display();
+    let value_style = if is_selected {
+        Style::default().yellow().bold()
+    } else {
+        Style::default()
+    };
+
+    let status_text = if app.weight.pending {
+        " (saving...)"
+    } else if app.weight.entry.is_some() {
+        " ✓"
+    } else {
+        ""
+    };
+
+    let lines = vec![
+        Line::from(vec![
+            Span::styled(weight_display, value_style),
+            Span::styled(status_text, Style::default().dim()),
+        ]),
+        Line::from(""),
+        Line::from(if is_selected {
+            "W/F: ±0.1kg • D: delete • Enter: save"
+        } else {
+            "E to select • type weight"
+        }),
+    ];
+
+    let block = Block::bordered()
+        .title(Line::from("Weight").style(title_style))
+        .border_style(border_style);
+
+    frame.render_widget(Paragraph::new(lines).block(block), area);
 }
 
 fn render_graphs(frame: &mut Frame, area: Rect, graphs: &[Graph]) {

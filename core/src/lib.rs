@@ -151,6 +151,29 @@ pub struct GraphPoint {
 }
 
 // ============================================================================
+// Body Weight
+// ============================================================================
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct WeightEntry {
+    pub id: i64,
+    pub day: String,
+    pub weight_kg: f64,
+    pub recorded_at: DateTime<Utc>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct WeightInput {
+    pub weight_kg: f64,
+    pub recorded_at: Option<DateTime<Utc>>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct WeightHistory {
+    pub entries: Vec<WeightEntry>,
+}
+
+// ============================================================================
 // Auth
 // ============================================================================
 
