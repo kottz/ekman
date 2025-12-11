@@ -165,11 +165,11 @@ fn render_weight(frame: &mut Frame, area: Rect, app: &App) {
     };
 
     let status_text = if app.weight.pending {
-        " (saving...)"
+        " (saving...)".to_string()
     } else if app.weight.entry.is_some() {
-        " ✓"
+        " ✓".to_string()
     } else {
-        ""
+        format!(" ({:.1})", app.weight.default_weight)
     };
 
     let lines = vec![
