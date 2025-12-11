@@ -1,0 +1,56 @@
+FROM lukemathwalker/cargo-chef:latest-rust-1 AS chef
+WORKDIR /app
+
+# ============================================
+# 1. Planner stage
+# ============================================
+FROM chef AS planner
+
+# Copy workspace manifests
+COPY ../Cargo.toml ../Cargo.lock ./
+COPY ../core/Cargo.toml core/
+COPY ../server/Cargo.toml server/
+COPY ../tui/Cargo.toml tui/
+
+# Dummy files so cargo metadata succeeds
+RUN mkdir -p core/src server/src tui/src \
+ && echo "// dummy" > core/src/lib.rs \
+ && echo "// dummy" > tui/src/lib.rs \
+ && echo "fn main() {}" > server/src/main.rs
+
+RUN cargo chef prepare --recipe-path recipe.json
+
+
+# ============================================
+# 2. Builder stage
+# ============================================
+FROM chef AS builder
+
+COPY --from=planner /app/recipe.json recipe.json
+RUN cargo chef cook --release --recipe-path recipe.json
+
+# Copy actual source
+COPY ../core core/
+COPY ../server server/
+COPY ../tui tui/
+COPY ../Cargo.toml ../Cargo.lock ./
+
+# Build server only
+RUN cargo build --release --bin ekman-server
+
+
+# ============================================
+# 3. Runtime image
+# ============================================
+FROM debian:trixie-slim AS runtime
+WORKDIR /app
+
+RUN apt-get update && apt-get install -y ca-certificates && rm -rf /var/lib/apt/lists/*
+
+COPY --from=builder /app/target/release/ekman-server /usr/local/bin/
+
+RUN mkdir -p /app/db
+ENV EKMAN__DB__PATH=/app/db
+
+EXPOSE 3000
+ENTRYPOINT ["/usr/local/bin/ekman-server"]
